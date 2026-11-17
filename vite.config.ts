@@ -1,5 +1,6 @@
 import "vite-plus/test/config";
 import { defineConfig } from "vite-plus";
+import * as NodeModule from "node:module";
 import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
@@ -22,6 +23,22 @@ const TEST_CONFIG_PACKAGES = [
   "apps/web",
   "packages/client-runtime",
 ];
+
+// A filtered install (`--filter=t3...`) leaves out mobile's toolchain, and its config requires
+// @babel/core as it loads; a root test run then lists mobile only when that resolves.
+const mobileTestConfigLoads = (() => {
+  try {
+    NodeModule.createRequire(new URL("./apps/mobile/package.json", import.meta.url)).resolve(
+      "@babel/core",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const TEST_CONFIG_PROJECTS = TEST_CONFIG_PACKAGES.filter(
+  (dir) => dir !== "apps/mobile" || mobileTestConfigLoads,
+);
 
 // `vp test run <file>` from the repo root hands each file to its package's
 // config. Packages that borrow this config (`--config ../../vite.config.ts`) run
@@ -153,7 +170,7 @@ export default defineConfig({
     ...(isRepoRootTestRun
       ? {
           projects: [
-            ...TEST_CONFIG_PACKAGES,
+            ...TEST_CONFIG_PROJECTS,
             {
               extends: true,
               test: {
