@@ -293,15 +293,9 @@ function cleanupCounts(report: StorageCleanupReport) {
   return counts;
 }
 
-function CleanupResults({
-  report,
-  environmentLabel,
-}: {
-  report: StorageCleanupReport;
-  environmentLabel: string;
-}) {
-  const gt = useGT();
-  const entries = [
+/** Thread results in the entry shape, then the report's own entries. */
+function cleanupEntries(report: StorageCleanupReport) {
+  return [
     ...(report.threads ?? []).map((entry) => ({
       ...entry,
       kind: "thread" as const,
@@ -311,6 +305,17 @@ function CleanupResults({
     })),
     ...report.entries,
   ];
+}
+
+function CleanupResults({
+  report,
+  environmentLabel,
+}: {
+  report: StorageCleanupReport;
+  environmentLabel: string;
+}) {
+  const gt = useGT();
+  const entries = cleanupEntries(report);
   return (
     <>
       {entries.map((entry, index) => {
@@ -511,7 +516,9 @@ function CleanupSection() {
         .map(async (environment) => {
           const result = await run({ environmentId: environment.environmentId, input: {} });
           if (result._tag === "Success") {
-            const failures = result.value.entries.filter((entry) => entry.outcome === "failed");
+            const failures = cleanupEntries(result.value).filter(
+              (entry) => entry.outcome === "failed",
+            );
             if (failures.length > 0)
               toastManager.add({
                 type: "error",

@@ -96,6 +96,7 @@ vi.mock(import("../ui/toast"), async (original) => {
   return { ...actual, toastManager: { ...actual.toastManager, add: vi.fn() } };
 });
 
+import { toastManager } from "../ui/toast";
 import { StorageCleanupSections } from "./StorageSettings";
 
 function setup() {
@@ -165,6 +166,44 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
+});
+
+it("shows a failed thread result from Delete now", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, settledThreadsAfterDays: 30 },
+  };
+  state.targets = [{ environmentId: "env-a", settings: state.settings }];
+  const report: StorageCleanupReport = {
+    trigger: "manual",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    finishedAt: "2026-11-20T12:00:01.000Z",
+    entries: [],
+    counts: { removed: 0, kept: 0, failed: 0 },
+    omittedCount: 0,
+    bytesFreed: 0,
+    threads: [
+      {
+        outcome: "failed",
+        reason: "database is locked",
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+      },
+    ],
+  };
+  state.run.mockResolvedValue({ _tag: "Success", value: report });
+  vi.mocked(toastManager.add).mockClear();
+  await using screen = await render(panel());
+
+  await act(async () => deleteButton(screen.container).click());
+  expect(toastManager.add).toHaveBeenCalledWith(
+    expect.objectContaining({
+      title: "Cleanup failed on env-a",
+      description: "database is locked",
+    }),
+  );
 });
 
 const rule = "Delete old browser artifacts";
