@@ -1728,18 +1728,14 @@ const make = Effect.gen(function* () {
     );
     const oldestExpired = (
       days: number | null,
-      since: (thread: OrchestrationV2ThreadShell) => DateTime.Utc | null,
+      candidates: ReadonlyArray<OrchestrationV2ThreadShell>,
+      sinceMs: (thread: OrchestrationV2ThreadShell) => number,
     ) =>
       days === null
         ? []
-        : idle
-            .flatMap((thread) => {
-              const at = since(thread);
-              const sinceMs = at === null ? null : DateTime.toEpochMillis(at);
-              return sinceMs !== null && sinceMs <= now - days * DAY_MS
-                ? [{ thread, sinceMs }]
-                : [];
-            })
+        : candidates
+            .map((thread) => ({ thread, sinceMs: sinceMs(thread) }))
+            .filter((candidate) => candidate.sinceMs <= now - days * DAY_MS)
             .toSorted((left, right) => left.sinceMs - right.sinceMs)
             .slice(0, THREADS_PER_SWEEP)
             .map(({ thread }) => thread);
@@ -1748,17 +1744,23 @@ const make = Effect.gen(function* () {
       resolveProjectSettings(serverSettings, thread.projectId).settings
         .sidebarAutoSettleKeepPullRequests &&
       (thread.pullRequests ?? []).some((link) => link.snapshot?.state === "open");
-    const settled = oldestExpired(settledThreadsAfterDays, (thread) =>
+    const settledCandidate = (thread: OrchestrationV2ThreadShell) =>
       thread.archivedAt === null &&
       thread.settledOverride === "settled" &&
       thread.settledAt !== null &&
       thread.pinnedAt == null &&
       !isSnoozed(thread, now) &&
-      !keepsPullRequest(thread)
-        ? thread.updatedAt
-        : null,
+      !keepsPullRequest(thread);
+    const settled = oldestExpired(
+      settledThreadsAfterDays,
+      idle.filter(settledCandidate),
+      (thread) => DateTime.toEpochMillis(thread.updatedAt),
     );
-    const archived = oldestExpired(archivedThreadsAfterDays, (thread) => thread.archivedAt);
+    const archived = oldestExpired(
+      archivedThreadsAfterDays,
+      idle.filter((thread) => thread.archivedAt !== null),
+      (thread) => DateTime.toEpochMillis(thread.archivedAt!),
+    );
     const apply = Effect.fnUntraced(function* (
       thread: OrchestrationV2ThreadShell,
       command: OrchestrationV2ServerCommand,
