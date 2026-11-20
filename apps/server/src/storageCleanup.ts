@@ -1754,7 +1754,14 @@ const make = Effect.gen(function* () {
     const settled = oldestExpired(
       settledThreadsAfterDays,
       idle.filter(settledCandidate),
-      (thread) => DateTime.toEpochMillis(thread.updatedAt),
+      // Like auto-settle, a snooze ending counts as activity.
+      (thread) => {
+        const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
+        const snoozedUntilMs = thread.snoozedUntil
+          ? DateTime.toEpochMillis(thread.snoozedUntil)
+          : 0;
+        return snoozedUntilMs <= now ? Math.max(updatedAtMs, snoozedUntilMs) : updatedAtMs;
+      },
     );
     const archived = oldestExpired(
       archivedThreadsAfterDays,

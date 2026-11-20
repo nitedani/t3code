@@ -1346,7 +1346,7 @@ export const StorageCleanupSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-  /** Counted from the thread's last update, which unarchiving refreshes. */
+  /** Counted from the thread's last update or snooze ending; unarchiving counts as an update. */
   settledThreadsAfterDays: StorageRetentionDays.pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),

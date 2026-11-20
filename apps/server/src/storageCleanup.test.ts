@@ -4003,6 +4003,10 @@ describe("settled and archived thread cleanup", () => {
           settled("settled-expired"),
           settled("settled-recent", { updatedAt: at(-29 * DAY_MS) }),
           settled("settled-snoozed", { snoozedUntil: at(DAY_MS), snoozedAt: at(-31 * DAY_MS) }),
+          settled("settled-woken", {
+            snoozedUntil: at(-60 * 60 * 1_000),
+            snoozedAt: at(-31 * DAY_MS),
+          }),
           settled("settled-running", { status: "running" }),
           settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
           settled("settled-open-pull-request", {
