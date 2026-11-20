@@ -4056,7 +4056,10 @@ describe("settled and archived thread cleanup", () => {
           settled("active-expired", { settledOverride: null, settledAt: null }),
           settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
+          settled("settled-scheduled"),
+          settled("archived-scheduled", { archivedAt: at(-8 * DAY_MS) }),
         ]);
+        fixture.setScheduledThreadIds(["settled-scheduled", "archived-scheduled"]);
         const report = yield* firstReport(fixture);
         expect(fixture.dispatched()).toMatchObject([
           {

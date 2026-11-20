@@ -1350,7 +1350,7 @@ export const StorageCleanupSettings = Schema.Struct({
   settledThreadsAfterDays: StorageRetentionDays.pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  /** Applies to every archived thread, including ones archived by hand. */
+  /** Applies to archived threads, including ones archived by hand. */
   archivedThreadsAfterDays: StorageRetentionDays.pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),

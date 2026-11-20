@@ -505,6 +505,14 @@ const make = Effect.gen(function* () {
     return { projects, threads: [...snapshot.threads, ...snapshot.archivedThreads] };
   });
 
+  const readScheduledThreadIds = Effect.fn("StorageCleanup.readScheduledThreadIds")(function* () {
+    const rows = yield* sql<{ threadId: string }>`
+      SELECT thread_id AS "threadId" FROM scheduled_tasks
+      WHERE enabled = 1 AND thread_id IS NOT NULL
+    `.pipe(NodeSqliteClient.readOnly);
+    return new Set(rows.map((row) => row.threadId));
+  });
+
   const containsProjectRoot = Effect.fn("StorageCleanup.containsProjectRoot")(function* (
     worktreePaths: ReadonlyArray<string>,
     projects: ReadonlyArray<{ readonly workspaceRoot: string }>,
@@ -1127,11 +1135,8 @@ const make = Effect.gen(function* () {
         if (file !== undefined) return `has local files (${file})`;
       }
       // Each run of a scheduled task works on what its earlier runs left in the folder.
-      const scheduled = yield* sql<{ threadId: string }>`
-        SELECT thread_id AS "threadId" FROM scheduled_tasks
-        WHERE enabled = 1 AND thread_id IS NOT NULL
-      `.pipe(NodeSqliteClient.readOnly);
-      if (scheduled.some((task) => threadIds.includes(task.threadId)))
+      const scheduled = yield* readScheduledThreadIds();
+      if (threadIds.some((threadId) => scheduled.has(threadId)))
         return "thread has a scheduled task";
       return null;
     });
@@ -1725,9 +1730,14 @@ const make = Effect.gen(function* () {
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
     if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
     const { projects, threads } = yield* readThreads();
-    // Side chats and subagents follow their parent.
+    // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
+    const scheduled = yield* readScheduledThreadIds();
+    // Side chats follow their parent.
     const idle = threads.filter(
-      (thread) => isListedThreadLineage(thread.lineage) && threadIdle(thread, now, serverSettings),
+      (thread) =>
+        isListedThreadLineage(thread.lineage) &&
+        !scheduled.has(thread.id) &&
+        threadIdle(thread, now, serverSettings),
     );
     const oldestExpired = (
       days: number | null,

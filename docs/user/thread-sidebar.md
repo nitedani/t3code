@@ -184,7 +184,7 @@ closes when the command succeeds and stays open when it fails.
 To keep the Settled list short, turn on **Archive settled threads** and **Delete archived
 threads** in Settings > Maintenance: the first archives a settled thread after that many days
 without changes, and the second deletes any archived thread, including ones you archived
-yourself, after its own number of days.
+yourself, after its own number of days. Both skip a thread that a scheduled task runs in.
 
 On web and desktop, press a thread's **Settle** button and drag up or down to
 settle every thread in that section between it and the one you release on.
