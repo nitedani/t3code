@@ -871,39 +871,59 @@ export function WorktreeCleanupSection() {
   );
 }
 
+function StorageRetentionRow({
+  setting,
+  title,
+  description,
+  settings,
+  targets,
+}: {
+  setting: "browserArtifactsAfterDays" | "logsAfterDays";
+  title: string;
+  description: string;
+  settings: StorageCleanupSettings;
+  targets: readonly ScopedSettingsTarget[];
+}) {
+  const gt = useGT();
+  const value = settings[setting];
+  const updateSettings = useUpdateScopedSettings();
+  const targetIdsKey = environmentIdsKey(targets.map((target) => target.environmentId).sort());
+  const mixed =
+    targets.length > 1 &&
+    targets.some((target) => target.settings.storageCleanup[setting] !== value);
+  const settledStatus = useDebouncedValue(`${targetIdsKey}:${mixed}`, 300);
+  return (
+    <AnimatedHeight>
+      <SettingsRow
+        title={title}
+        status={
+          targets.length > 1 && settledStatus === `${targetIdsKey}:true`
+            ? gt("Mixed across selected machines")
+            : undefined
+        }
+        managedPaths={[`storageCleanup.${setting}`]}
+        description={description}
+        serverScoped
+        control={
+          <RetentionControl
+            label={title}
+            value={value}
+            onChange={(days, onFailed) =>
+              updateSettings({ storageCleanup: { [setting]: days } }, { onFailed })
+            }
+          />
+        }
+      />
+    </AnimatedHeight>
+  );
+}
+
 /** Retention for logs and captures, and the manual cleanup run, which covers worktrees too. */
 export function StorageCleanupSections() {
   const gt = useGT();
   const { scope, connectedEnvironments, targets } = useSettingsScope();
-  const scopedSettings = useScopedSettings();
-  const updateSettings = useUpdateScopedSettings();
-  const settings = scopedSettings.storageCleanup;
-  const targetIdsKey = environmentIdsKey(targets.map((target) => target.environmentId).sort());
-  const artifactsMixed =
-    targets.length > 1 &&
-    targets.some(
-      (target) =>
-        target.settings.storageCleanup.browserArtifactsAfterDays !==
-        settings.browserArtifactsAfterDays,
-    );
-  const logsMixed =
-    targets.length > 1 &&
-    targets.some(
-      (target) => target.settings.storageCleanup.logsAfterDays !== settings.logsAfterDays,
-    );
-  const settledArtifactsStatus = useDebouncedValue(`${targetIdsKey}:${artifactsMixed}`, 300);
-  const settledLogsStatus = useDebouncedValue(`${targetIdsKey}:${logsMixed}`, 300);
-  const artifactsStatus =
-    targets.length > 1 && settledArtifactsStatus === `${targetIdsKey}:true`
-      ? gt("Mixed across selected machines")
-      : undefined;
-  const logsStatus =
-    targets.length > 1 && settledLogsStatus === `${targetIdsKey}:true`
-      ? gt("Mixed across selected machines")
-      : undefined;
+  const settings = useScopedSettings().storageCleanup;
   if (scope.kind === "project" || scope.kind === "checkout") return null;
-  const update = (patch: Partial<StorageCleanupSettings>, options: SaveOptions) =>
-    updateSettings({ storageCleanup: patch }, options);
   const databaseStorageNotice = (
     <DatabaseStorageNotice
       environments={connectedEnvironments.filter(
@@ -927,44 +947,24 @@ export function StorageCleanupSections() {
     <>
       {databaseStorageNotice}
       <SettingsSection id="storage-artifacts" title={gt("Artifacts and logs")}>
-        <AnimatedHeight>
-          <SettingsRow
-            title={gt("Delete old browser artifacts")}
-            status={artifactsStatus}
-            managedPaths={["storageCleanup.browserArtifactsAfterDays"]}
-            description={gt(
-              "Delete saved browser captures after this many days. Older capture links will no longer open.",
-            )}
-            serverScoped
-            control={
-              <RetentionControl
-                label={gt("Delete old browser artifacts")}
-                value={settings.browserArtifactsAfterDays}
-                onChange={(browserArtifactsAfterDays, onFailed) =>
-                  update({ browserArtifactsAfterDays }, { onFailed })
-                }
-              />
-            }
-          />
-        </AnimatedHeight>
-        <AnimatedHeight>
-          <SettingsRow
-            title={gt("Delete old rotated logs")}
-            status={logsStatus}
-            managedPaths={["storageCleanup.logsAfterDays"]}
-            description={gt(
-              "Delete inactive rotated log files after this many days. Current logs are kept.",
-            )}
-            serverScoped
-            control={
-              <RetentionControl
-                label={gt("Delete old rotated logs")}
-                value={settings.logsAfterDays}
-                onChange={(logsAfterDays, onFailed) => update({ logsAfterDays }, { onFailed })}
-              />
-            }
-          />
-        </AnimatedHeight>
+        <StorageRetentionRow
+          setting="browserArtifactsAfterDays"
+          settings={settings}
+          targets={targets}
+          title={gt("Delete old browser artifacts")}
+          description={gt(
+            "Delete saved browser captures after this many days. Older capture links will no longer open.",
+          )}
+        />
+        <StorageRetentionRow
+          setting="logsAfterDays"
+          settings={settings}
+          targets={targets}
+          title={gt("Delete old rotated logs")}
+          description={gt(
+            "Delete inactive rotated log files after this many days. Current logs are kept.",
+          )}
+        />
       </SettingsSection>
       <CleanupSection />
     </>
