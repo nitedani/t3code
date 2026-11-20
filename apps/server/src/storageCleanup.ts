@@ -316,6 +316,96 @@ export function storageCleanupPullRequestMerged(
   );
 }
 
+/**
+ * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list.
+ * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
+ * unarchiving counts as a change.
+ */
+function planThreadCleanup({
+  threads,
+  scheduledThreadIds,
+  settings,
+  now,
+}: {
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
+  readonly scheduledThreadIds: ReadonlySet<string>;
+  readonly settings: ServerSettings;
+  readonly now: number;
+}) {
+  const { settledThreadsAfterDays, archivedThreadsAfterDays } = settings.storageCleanup;
+  const oldestExpired = <Candidate extends { readonly sinceMs: number }>(
+    days: number,
+    candidates: ReadonlyArray<Candidate>,
+  ) =>
+    candidates
+      .filter((candidate) => candidate.sinceMs <= now - days * DAY_MS)
+      .toSorted((left, right) => left.sinceMs - right.sinceMs)
+      .slice(0, THREADS_PER_SWEEP);
+  const idle = threads.filter(
+    (thread) =>
+      // Side chats follow their parent; subagent threads are not cleaned.
+      isListedThreadLineage(thread.lineage) &&
+      // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
+      !scheduledThreadIds.has(thread.id) &&
+      threadIdle(thread, now, settings),
+  );
+  const deletions =
+    archivedThreadsAfterDays === null
+      ? []
+      : oldestExpired(
+          archivedThreadsAfterDays,
+          idle.flatMap((thread) =>
+            thread.archivedAt === null
+              ? []
+              : [
+                  {
+                    thread,
+                    archivedAt: thread.archivedAt,
+                    sinceMs: DateTime.toEpochMillis(thread.archivedAt),
+                  },
+                ],
+          ),
+        );
+  if (settledThreadsAfterDays === null)
+    return { deletions, archives: [], pullRequestsToRefresh: [] };
+  // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
+  const heldByPullRequests = (thread: OrchestrationV2ThreadShell) =>
+    resolveProjectSettings(settings, thread.projectId).settings.sidebarAutoSettleKeepPullRequests
+      ? visibleThreadPullRequests(thread.pullRequests ?? []).filter(
+          (link) => link.snapshot?.state === "open",
+        )
+      : [];
+  const shelfClockMs = (thread: OrchestrationV2ThreadShell) =>
+    Math.max(
+      DateTime.toEpochMillis(thread.updatedAt),
+      ...[thread.lastSnoozeWakeAt, thread.snoozedUntil]
+        .filter((at) => at != null)
+        .map(DateTime.toEpochMillis)
+        .filter((ms) => ms <= now),
+    );
+  const shelf = idle.flatMap((thread) =>
+    thread.archivedAt === null &&
+    thread.settledOverride === "settled" &&
+    thread.settledAt !== null &&
+    thread.pinnedAt == null &&
+    !isSnoozed(thread, now)
+      ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
+      : [],
+  );
+  const sideChatsUnchangedSince = DateTime.makeUnsafe(now - settledThreadsAfterDays * DAY_MS);
+  return {
+    deletions,
+    archives: oldestExpired(
+      settledThreadsAfterDays,
+      shelf.filter((candidate) => candidate.pullRequests.length === 0),
+    ).map(({ thread }) => ({ thread, sideChatsUnchangedSince })),
+    pullRequestsToRefresh: oldestExpired(
+      settledThreadsAfterDays,
+      shelf.filter((candidate) => candidate.pullRequests.length > 0),
+    ).flatMap((candidate) => candidate.pullRequests),
+  };
+}
+
 export class StorageCleanup extends Context.Service<
   StorageCleanup,
   {
@@ -1731,68 +1821,12 @@ const make = Effect.gen(function* () {
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
     if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
     const { projects, threads } = yield* readThreads();
-    // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
-    const scheduled = yield* readScheduledThreadIds();
-    // Side chats follow their parent; subagent threads are not cleaned.
-    const idle = threads.filter(
-      (thread) =>
-        isListedThreadLineage(thread.lineage) &&
-        !scheduled.has(thread.id) &&
-        threadIdle(thread, now, serverSettings),
-    );
-    const oldestExpired = (
-      days: number | null,
-      candidates: ReadonlyArray<OrchestrationV2ThreadShell>,
-      sinceMs: (thread: OrchestrationV2ThreadShell) => number,
-    ) =>
-      days === null
-        ? []
-        : candidates
-            .map((thread) => ({ thread, sinceMs: sinceMs(thread) }))
-            .filter((candidate) => candidate.sinceMs <= now - days * DAY_MS)
-            .toSorted((left, right) => left.sinceMs - right.sinceMs)
-            .slice(0, THREADS_PER_SWEEP)
-            .map(({ thread }) => thread);
-    // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
-    const keptPullRequests = (thread: OrchestrationV2ThreadShell) =>
-      resolveProjectSettings(serverSettings, thread.projectId).settings
-        .sidebarAutoSettleKeepPullRequests
-        ? visibleThreadPullRequests(thread.pullRequests ?? []).filter(
-            (link) => link.snapshot?.state === "open",
-          )
-        : [];
-    const settledCandidates = idle.filter(
-      (thread) =>
-        thread.archivedAt === null &&
-        thread.settledOverride === "settled" &&
-        thread.settledAt !== null &&
-        thread.pinnedAt == null &&
-        !isSnoozed(thread, now),
-    );
-    // A snooze ending counts as a change.
-    const settledSinceMs = (thread: OrchestrationV2ThreadShell) =>
-      Math.max(
-        DateTime.toEpochMillis(thread.updatedAt),
-        ...[thread.lastSnoozeWakeAt, thread.snoozedUntil]
-          .filter((at) => at != null)
-          .map(DateTime.toEpochMillis)
-          .filter((ms) => ms <= now),
-      );
-    const settled = oldestExpired(
-      settledThreadsAfterDays,
-      settledCandidates.filter((thread) => keptPullRequests(thread).length === 0),
-      settledSinceMs,
-    );
-    const keptByPullRequest = oldestExpired(
-      settledThreadsAfterDays,
-      settledCandidates.filter((thread) => keptPullRequests(thread).length > 0),
-      settledSinceMs,
-    );
-    const archived = oldestExpired(
-      archivedThreadsAfterDays,
-      idle.filter((thread) => thread.archivedAt !== null),
-      (thread) => DateTime.toEpochMillis(thread.archivedAt!),
-    );
+    const plan = planThreadCleanup({
+      threads,
+      scheduledThreadIds: yield* readScheduledThreadIds(),
+      settings: serverSettings,
+      now,
+    });
     const apply = Effect.fnUntraced(function* (
       thread: OrchestrationV2ThreadShell,
       command: OrchestrationV2ServerCommand,
@@ -1831,25 +1865,23 @@ const make = Effect.gen(function* () {
     const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
       return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
     });
-    for (const thread of archived) {
+    for (const { thread, archivedAt } of plan.deletions) {
       yield* apply(
         thread,
         {
           type: "thread.delete",
           commandId: yield* commandId(thread),
           threadId: thread.id,
-          expectedArchivedAt: thread.archivedAt!,
+          expectedArchivedAt: archivedAt,
         },
         `Deleted after ${archivedThreadsAfterDays} days archived`,
       );
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
-    for (const thread of keptByPullRequest) {
-      yield* Effect.forEach(keptPullRequests(thread), pullRequestSync.requestSync, {
-        discard: true,
-      });
-    }
-    for (const thread of settled) {
+    yield* Effect.forEach(plan.pullRequestsToRefresh, pullRequestSync.requestSync, {
+      discard: true,
+    });
+    for (const { thread, sideChatsUnchangedSince } of plan.archives) {
       yield* apply(
         thread,
         {
@@ -1857,7 +1889,7 @@ const make = Effect.gen(function* () {
           commandId: yield* commandId(thread),
           threadId: thread.id,
           expectedUpdatedAt: thread.updatedAt,
-          sideChatsUnchangedSince: DateTime.makeUnsafe(now - settledThreadsAfterDays! * DAY_MS),
+          sideChatsUnchangedSince,
         },
         `Archived after ${settledThreadsAfterDays} days settled`,
       );
