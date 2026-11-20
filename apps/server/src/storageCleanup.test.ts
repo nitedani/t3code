@@ -3997,6 +3997,12 @@ describe("settled and archived thread cleanup", () => {
       updatedAt: at(-31 * DAY_MS),
       ...overrides,
     });
+  const sideChatOf = (parent: string) => ({
+    rootThreadId: ThreadId.make(parent),
+    parentThreadId: ThreadId.make(parent),
+    relationshipToParent: "fork" as const,
+    sideChat: true,
+  });
   const firstReport = (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
     Effect.gen(function* () {
       yield* fixture.activate(Stream.empty);
@@ -4059,13 +4065,10 @@ describe("settled and archived thread cleanup", () => {
               { ...openPullRequest.pullRequests![0]!, number: 7, source: "stack-dismissed" },
             ],
           }),
-          settled("settled-side-chat", {
-            lineage: {
-              rootThreadId: ThreadId.make("settled-expired"),
-              parentThreadId: ThreadId.make("settled-expired"),
-              relationshipToParent: "fork",
-              sideChat: true,
-            },
+          settled("settled-side-chat", { lineage: sideChatOf("settled-expired") }),
+          settled("settled-dismissed-open-side-chat", {
+            lineage: sideChatOf("settled-dismissed-open"),
+            archivedAt: at(-DAY_MS),
           }),
           settled("active-expired", { settledOverride: null, settledAt: null }),
           settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
@@ -4074,12 +4077,11 @@ describe("settled and archived thread cleanup", () => {
           settled("archived-scheduled", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-parent", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-parent-side-chat", {
-            lineage: {
-              rootThreadId: ThreadId.make("archived-parent"),
-              parentThreadId: ThreadId.make("archived-parent"),
-              relationshipToParent: "fork",
-              sideChat: true,
-            },
+            lineage: sideChatOf("archived-parent"),
+            archivedAt: at(-8 * DAY_MS),
+          }),
+          settled("archived-expired-side-chat", {
+            lineage: sideChatOf("archived-expired"),
             archivedAt: at(-8 * DAY_MS),
           }),
         ]);
@@ -4088,6 +4090,7 @@ describe("settled and archived thread cleanup", () => {
           "archived-scheduled",
           "settled-side-chat",
           "archived-parent-side-chat",
+          "settled-dismissed-open-side-chat",
         ]);
         const report = yield* firstReport(fixture);
         expect(() => decodeOlderReport(encodeReport(report))).not.toThrow();
