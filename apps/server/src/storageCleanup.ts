@@ -53,6 +53,7 @@ import { scratchFolderRoot } from "./project/ManagedProjectFolders.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointService.ts";
 import { isSnoozed, threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
 import { MAX_OVERDUE_ARM_MS } from "./orchestration-v2/UsageLimitRecoveryWorker.ts";
@@ -330,6 +331,7 @@ const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const random = yield* SecureRandom.SecureRandom;
+  const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -1740,28 +1742,34 @@ const make = Effect.gen(function* () {
             .slice(0, THREADS_PER_SWEEP)
             .map(({ thread }) => thread);
     // Like auto-settle, a project that keeps pull requests keeps a thread whose pull request is open.
-    const keepsPullRequest = (thread: OrchestrationV2ThreadShell) =>
+    const keptPullRequests = (thread: OrchestrationV2ThreadShell) =>
       resolveProjectSettings(serverSettings, thread.projectId).settings
-        .sidebarAutoSettleKeepPullRequests &&
-      (thread.pullRequests ?? []).some((link) => link.snapshot?.state === "open");
-    const settledCandidate = (thread: OrchestrationV2ThreadShell) =>
-      thread.archivedAt === null &&
-      thread.settledOverride === "settled" &&
-      thread.settledAt !== null &&
-      thread.pinnedAt == null &&
-      !isSnoozed(thread, now) &&
-      !keepsPullRequest(thread);
+        .sidebarAutoSettleKeepPullRequests
+        ? (thread.pullRequests ?? []).filter((link) => link.snapshot?.state === "open")
+        : [];
+    const settledCandidates = idle.filter(
+      (thread) =>
+        thread.archivedAt === null &&
+        thread.settledOverride === "settled" &&
+        thread.settledAt !== null &&
+        thread.pinnedAt == null &&
+        !isSnoozed(thread, now),
+    );
+    // Like auto-settle, a snooze ending counts as activity.
+    const settledSinceMs = (thread: OrchestrationV2ThreadShell) => {
+      const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
+      const snoozedUntilMs = thread.snoozedUntil ? DateTime.toEpochMillis(thread.snoozedUntil) : 0;
+      return snoozedUntilMs <= now ? Math.max(updatedAtMs, snoozedUntilMs) : updatedAtMs;
+    };
     const settled = oldestExpired(
       settledThreadsAfterDays,
-      idle.filter(settledCandidate),
-      // Like auto-settle, a snooze ending counts as activity.
-      (thread) => {
-        const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
-        const snoozedUntilMs = thread.snoozedUntil
-          ? DateTime.toEpochMillis(thread.snoozedUntil)
-          : 0;
-        return snoozedUntilMs <= now ? Math.max(updatedAtMs, snoozedUntilMs) : updatedAtMs;
-      },
+      settledCandidates.filter((thread) => keptPullRequests(thread).length === 0),
+      settledSinceMs,
+    );
+    const keptByPullRequest = oldestExpired(
+      settledThreadsAfterDays,
+      settledCandidates.filter((thread) => keptPullRequests(thread).length > 0),
+      settledSinceMs,
     );
     const archived = oldestExpired(
       archivedThreadsAfterDays,
@@ -1817,6 +1825,12 @@ const make = Effect.gen(function* () {
         },
         `Deleted after ${archivedThreadsAfterDays} days archived`,
       );
+    }
+    // A settled thread's links are read only on request, so a merge or close would go unseen.
+    for (const thread of keptByPullRequest) {
+      yield* Effect.forEach(keptPullRequests(thread), pullRequestSync.requestSync, {
+        discard: true,
+      });
     }
     for (const thread of settled) {
       yield* apply(

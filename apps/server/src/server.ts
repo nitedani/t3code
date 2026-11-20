@@ -690,12 +690,20 @@ const layerServerRestart = Layer.effect(
   }),
 );
 
+const layerPullRequestSync = PullRequestSyncReactor.layer.pipe(
+  Layer.provide(layerPullRequestService),
+  Layer.provide(ProjectionStoreV2.layer),
+);
+
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
-  StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  StorageCleanup.layer.pipe(
+    Layer.provide(layerPullRequestSync),
+    Layer.provide(ProjectionStoreV2.layer),
+  ),
   DatabaseStorage.layer.pipe(
     Layer.provide(ProjectionMaintenance.layer),
     Layer.provide(layerServerRestart),
@@ -708,11 +716,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       yield* service.start();
     }),
-  ).pipe(
-    Layer.provideMerge(PullRequestSyncReactor.layer),
-    Layer.provide(layerPullRequestService),
-    Layer.provide(ProjectionStoreV2.layer),
-  ),
+  ).pipe(Layer.provideMerge(layerPullRequestSync)),
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestWatchReactor.PullRequestWatchReactor;

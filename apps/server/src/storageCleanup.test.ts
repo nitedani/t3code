@@ -38,6 +38,7 @@ import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -376,6 +377,7 @@ const cleanupFixture = (
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const dispatched: OrchestrationV2ServerCommand[] = [];
     let changedThreadIds: ThreadId[] = [];
+    const requestedPullRequests: number[] = [];
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -488,6 +490,9 @@ const cleanupFixture = (
               : Effect.succeed({ sequence: 0, storedEvents: [] });
           }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
+      Effect.provideService(PullRequestSyncReactor.PullRequestSyncReactor, {
+        requestSync: (key) => Effect.sync(() => void requestedPullRequests.push(key.number)),
+      } as PullRequestSyncReactor.PullRequestSyncReactor["Service"]),
       Effect.provideService(
         SqlClient.SqlClient,
         sqlOverride ??
@@ -591,6 +596,7 @@ const cleanupFixture = (
       },
       threadBranches: () => threads.map((thread) => thread.branch),
       dispatched: () => dispatched,
+      requestedPullRequests: () => requestedPullRequests,
       changeBeforeDispatch: (threadIds: ThreadId[]) => {
         changedThreadIds = threadIds;
       },
@@ -3999,6 +4005,28 @@ describe("settled and archived thread cleanup", () => {
           archivedThreadsAfterDays: 7,
         });
         fixture.setSettings({ sidebarAutoSettleKeepPullRequests: true });
+        const openPullRequest = settled("settled-open-pull-request", {
+          pullRequests: [
+            {
+              host: "example.test",
+              repository: "owner/repository",
+              number: 42,
+              url: "https://example.test/owner/repository/pull/42",
+              source: "manual",
+              linkedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+              snapshot: {
+                state: "open",
+                title: "Pull request",
+                headBranch: "feature",
+                baseBranch: "main",
+                isDraft: false,
+                updatedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+                syncedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+              },
+              stack: null,
+            },
+          ],
+        });
         fixture.setThreads([
           settled("settled-expired"),
           settled("settled-recent", { updatedAt: at(-29 * DAY_MS) }),
@@ -4009,28 +4037,7 @@ describe("settled and archived thread cleanup", () => {
           }),
           settled("settled-running", { status: "running" }),
           settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
-          settled("settled-open-pull-request", {
-            pullRequests: [
-              {
-                host: "example.test",
-                repository: "owner/repository",
-                number: 42,
-                url: "https://example.test/owner/repository/pull/42",
-                source: "manual",
-                linkedAt: DateTime.formatIso(at(-35 * DAY_MS)),
-                snapshot: {
-                  state: "open",
-                  title: "Pull request",
-                  headBranch: "feature",
-                  baseBranch: "main",
-                  isDraft: false,
-                  updatedAt: DateTime.formatIso(at(-35 * DAY_MS)),
-                  syncedAt: DateTime.formatIso(at(-35 * DAY_MS)),
-                },
-                stack: null,
-              },
-            ],
-          }),
+          openPullRequest,
           settled("settled-side-chat", {
             lineage: {
               rootThreadId: ThreadId.make("settled-expired"),
@@ -4068,6 +4075,29 @@ describe("settled and archived thread cleanup", () => {
             outcome: "removed",
             reason: "Archived after 30 days settled",
           },
+        ]);
+
+        // A settled thread's links are re-read only on request, so the sweep asks for the open one.
+        expect(fixture.requestedPullRequests()).toEqual([42]);
+        const [link] = openPullRequest.pullRequests!;
+        fixture.setThreads([
+          {
+            ...openPullRequest,
+            pullRequests: [
+              {
+                ...link!,
+                snapshot: {
+                  ...link!.snapshot!,
+                  state: "merged",
+                  mergedAt: DateTime.formatIso(at(-DAY_MS)),
+                },
+              },
+            ],
+          },
+        ]);
+        yield* fixture.service.runNow;
+        expect(fixture.dispatched().slice(2)).toMatchObject([
+          { type: "thread.archive", threadId: "settled-open-pull-request" },
         ]);
       }),
     ),
