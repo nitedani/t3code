@@ -49,6 +49,7 @@ import * as ServerConfig from "./config.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
+import { visibleThreadPullRequests } from "./sourceControl/threadPullRequests.ts";
 import { scratchFolderRoot } from "./project/ManagedProjectFolders.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
@@ -1745,7 +1746,9 @@ const make = Effect.gen(function* () {
     const keptPullRequests = (thread: OrchestrationV2ThreadShell) =>
       resolveProjectSettings(serverSettings, thread.projectId).settings
         .sidebarAutoSettleKeepPullRequests
-        ? (thread.pullRequests ?? []).filter((link) => link.snapshot?.state === "open")
+        ? visibleThreadPullRequests(thread.pullRequests ?? []).filter(
+            (link) => link.snapshot?.state === "open",
+          )
         : [];
     const settledCandidates = idle.filter(
       (thread) =>
