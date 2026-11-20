@@ -15551,36 +15551,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.archive":
       case "thread.unarchive": {
         const parent = yield* findThread(command.threadId);
-        if (
-          command.type === "thread.archive" &&
-          command.expectedUpdatedAt !== undefined &&
-          parent !== null &&
-          DateTime.toEpochMillis(parent.updatedAt) !==
-            DateTime.toEpochMillis(command.expectedUpdatedAt)
-        ) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `Thread ${command.threadId} changed before it was archived.`,
-          });
-        }
-        if (command.type === "thread.archive" && command.sideChatsUnchangedSince !== undefined) {
-          const cutoff = DateTime.toEpochMillis(command.sideChatsUnchangedSince);
-          for (const threadId of sideChatIds) {
-            const sideChat = yield* findThread(threadId);
-            if (sideChat === null || sideChat.archivedAt !== null) continue;
-            const records = yield* projectionStore
-              .getThreadRecords(threadId, ["runs", "runtimeRequests"])
-              .pipe(mapDispatchError(command));
-            if (
-              DateTime.toEpochMillis(sideChat.updatedAt) > cutoff ||
-              threadHasUnfinishedWork(records)
-            ) {
-              return yield* new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause: `Thread ${command.threadId} has a side chat in use.`,
-              });
+        if (command.type === "thread.archive") {
+          if (
+            command.expectedUpdatedAt !== undefined &&
+            parent !== null &&
+            DateTime.toEpochMillis(parent.updatedAt) !==
+              DateTime.toEpochMillis(command.expectedUpdatedAt)
+          ) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: `Thread ${command.threadId} changed before it was archived.`,
+            });
+          }
+          if (command.sideChatsUnchangedSince !== undefined) {
+            const cutoff = DateTime.toEpochMillis(command.sideChatsUnchangedSince);
+            for (const threadId of sideChatIds) {
+              const sideChat = yield* findThread(threadId);
+              if (sideChat === null || sideChat.archivedAt !== null) continue;
+              const records = yield* projectionStore
+                .getThreadRecords(threadId, ["runs", "runtimeRequests"])
+                .pipe(mapDispatchError(command));
+              if (
+                DateTime.toEpochMillis(sideChat.updatedAt) > cutoff ||
+                threadHasUnfinishedWork(records)
+              ) {
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: `Thread ${command.threadId} has a side chat in use.`,
+                });
+              }
             }
           }
         }
