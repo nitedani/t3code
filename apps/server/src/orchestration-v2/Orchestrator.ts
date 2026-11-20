@@ -15564,6 +15564,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             cause: `Thread ${command.threadId} changed before it was archived.`,
           });
         }
+        // Archiving ends a guest link, so a link opened since the caller looked keeps the thread.
+        if (
+          command.type === "thread.archive" &&
+          command.onlyIfUnshared === true &&
+          parent?.guestShare != null &&
+          DateTime.toEpochMillis(yield* DateTime.now) < Date.parse(parent.guestShare.expiresAt)
+        ) {
+          return { events: [], effects: [] };
+        }
         const parentArchivedAt = parent?.archivedAt ?? null;
         yield* dispatchThreadMutation(command, events, effects);
         // Unarchive restores the side chats this parent's archive took, not ones archived before it.
@@ -16013,7 +16022,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
-          (command.type === "thread.delete" && command.onlyIfUnused === true),
+          (command.type === "thread.delete" && command.onlyIfUnused === true) ||
+          (command.type === "thread.archive" && command.onlyIfUnshared === true),
         (_planned) =>
           new OrchestratorDispatchError({
             commandId: command.commandId,

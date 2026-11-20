@@ -1763,6 +1763,7 @@ const make = Effect.gen(function* () {
       thread: OrchestrationV2ThreadShell,
       command: OrchestrationV2ServerCommand,
       reason: string,
+      keptReason?: string,
     ) {
       const entry = {
         kind: "thread" as const,
@@ -1775,7 +1776,13 @@ const make = Effect.gen(function* () {
         files: null,
       };
       yield* engine.dispatch(command).pipe(
-        Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
+        Effect.map(({ storedEvents }) =>
+          entries.push(
+            storedEvents.length === 0 && keptReason !== undefined
+              ? { ...entry, outcome: "kept", reason: keptReason }
+              : { ...entry, outcome: "removed", reason },
+          ),
+        ),
         // The thread changed after this sweep read it.
         Effect.catchTags({
           OrchestratorDispatchError: (error) =>
@@ -1817,8 +1824,10 @@ const make = Effect.gen(function* () {
           commandId: yield* commandId(thread),
           threadId: thread.id,
           expectedUpdatedAt: thread.updatedAt,
+          onlyIfUnshared: true,
         },
         `Archived after ${settledThreadsAfterDays} days settled`,
+        "Shared with a guest",
       );
     }
   });
