@@ -942,7 +942,7 @@ function StorageRetentionRow({
   );
 }
 
-/** Retention for logs and captures, and the manual cleanup run, which covers worktrees too. */
+/** Retention for logs, captures and threads, and the manual cleanup run, which covers worktrees too. */
 export function StorageCleanupSections() {
   const gt = useGT();
   const { scope, connectedEnvironments } = useSettingsScope();
