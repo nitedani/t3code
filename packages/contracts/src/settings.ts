@@ -1309,7 +1309,7 @@ export function databaseReclaimMinutes(status: DatabaseStorageStatus): number {
 }
 
 export const StorageCleanupReportEntry = Schema.Struct({
-  kind: Schema.Literals(["worktree", "thread", "browser-artifacts", "logs"]),
+  kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
@@ -1320,6 +1320,14 @@ export const StorageCleanupReportEntry = Schema.Struct({
   files: Schema.NullOr(Schema.Number).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 });
 export type StorageCleanupReportEntry = typeof StorageCleanupReportEntry.Type;
+export const StorageCleanupThreadEntry = Schema.Struct({
+  outcome: StorageCleanupReportEntry.fields.outcome,
+  reason: Schema.String,
+  projectPath: Schema.NullOr(Schema.String),
+  threadId: Schema.NullOr(ThreadId),
+  threadTitle: Schema.NullOr(Schema.String),
+});
+export type StorageCleanupThreadEntry = typeof StorageCleanupThreadEntry.Type;
 export const StorageCleanupReport = Schema.Struct({
   trigger: Schema.Literals(["automatic", "manual"]),
   startedAt: Schema.String,
@@ -1328,6 +1336,8 @@ export const StorageCleanupReport = Schema.Struct({
   counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
   omittedCount: Schema.Number,
   bytesFreed: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** Outside `entries` and `counts`, so clients that predate thread cleanup still decode the report. */
+  threads: Schema.optionalKey(Schema.Array(StorageCleanupThreadEntry)),
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 

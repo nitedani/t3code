@@ -22,6 +22,7 @@ import type {
   WorktreeCleanupRules,
   StorageCleanupReport,
   StorageCleanupReportEntry,
+  StorageCleanupThreadEntry,
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveProjectSettings, resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
@@ -1829,7 +1830,7 @@ const make = Effect.gen(function* () {
   const cleanThreads = Effect.fn("StorageCleanup.cleanThreads")(function* (
     serverSettings: ServerSettings,
     now: number,
-    entries: StorageCleanupReportEntry[],
+    entries: StorageCleanupThreadEntry[],
   ) {
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
     if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
@@ -1846,14 +1847,10 @@ const make = Effect.gen(function* () {
       reason: string,
     ) {
       const entry = {
-        kind: "thread" as const,
-        path: null,
         projectPath:
           projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
         threadId: thread.id,
         threadTitle: thread.title,
-        bytes: null,
-        files: null,
       };
       yield* engine.dispatch(command).pipe(
         Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
@@ -2033,19 +2030,16 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
-    yield* cleanThreads(serverSettings, now, entries).pipe(
+    const threadEntries: StorageCleanupThreadEntry[] = [];
+    yield* cleanThreads(serverSettings, now, threadEntries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
-          entries.push({
-            kind: "thread",
+          threadEntries.push({
             outcome: "failed",
             reason: cleanupFailureReason(error),
-            path: null,
             projectPath: null,
             threadId: null,
             threadTitle: null,
-            bytes: null,
-            files: null,
           });
           yield* Effect.logWarning("thread cleanup failed", { error });
         }),
@@ -2146,6 +2140,7 @@ const make = Effect.gen(function* () {
       counts,
       bytesFreed,
       omittedCount: Math.max(0, entries.length - REPORT_ENTRY_LIMIT),
+      threads: threadEntries,
     };
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;

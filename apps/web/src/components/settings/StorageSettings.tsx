@@ -286,6 +286,13 @@ function lastRunSummary(
   return entries.map((entry) => `${entry.label}: ${entry.counts}`).join(" · ");
 }
 
+/** Thread outcomes sit outside the report's counts, which clients that predate them also read. */
+function cleanupCounts(report: StorageCleanupReport) {
+  const counts = { ...report.counts };
+  for (const entry of report.threads ?? []) counts[entry.outcome]++;
+  return counts;
+}
+
 function CleanupResults({
   report,
   environmentLabel,
@@ -294,9 +301,19 @@ function CleanupResults({
   environmentLabel: string;
 }) {
   const gt = useGT();
+  const entries = [
+    ...(report.threads ?? []).map((entry) => ({
+      ...entry,
+      kind: "thread" as const,
+      path: null,
+      bytes: null,
+      files: null,
+    })),
+    ...report.entries,
+  ];
   return (
     <>
-      {report.entries.map((entry, index) => {
+      {entries.map((entry, index) => {
         const name =
           entry.kind === "worktree"
             ? ((entry.threadId === null
@@ -381,7 +398,7 @@ function CleanupResults({
           )}
         </p>
       )}
-      {report.entries.length === 0 && report.omittedCount === 0 && (
+      {entries.length === 0 && report.omittedCount === 0 && (
         <p className="px-3 py-2.5 text-xs text-muted-foreground sm:px-4">
           <T>
             <Var>{environmentLabel}</Var>: Nothing needed cleanup.
@@ -451,34 +468,36 @@ function CleanupSection() {
   const summaries = supported.map((environment) => {
     const query = state.find((entry) => entry.environmentId === environment.environmentId);
     const report = query?.report ?? null;
+    const counts = report === null ? null : cleanupCounts(report);
     return {
       environment,
       report,
       label: settingsScopeEnvironmentLabel(environment, connectedEnvironments),
-      counts: report
-        ? report.counts.failed > 0
-          ? gt("{removed} removed, {kept} kept, {failed} failed", report.counts)
-          : gt("{removed} removed, {kept} kept", report.counts)
+      counts: counts
+        ? counts.failed > 0
+          ? gt("{removed} removed, {kept} kept, {failed} failed", counts)
+          : gt("{removed} removed, {kept} kept", counts)
         : "",
-      description: report
-        ? report.counts.failed > 0
-          ? gt(
-              "{count, plural, one {Last run {when}. {bytes} recovered. {count} item couldn't be removed.} other {Last run {when}. {bytes} recovered. {count} items couldn't be removed.}}",
-              {
-                count: report.counts.failed,
+      description:
+        report !== null && counts !== null
+          ? counts.failed > 0
+            ? gt(
+                "{count, plural, one {Last run {when}. {bytes} recovered. {count} item couldn't be removed.} other {Last run {when}. {bytes} recovered. {count} items couldn't be removed.}}",
+                {
+                  count: counts.failed,
+                  when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
+                  bytes: formatBytes(report.bytesFreed),
+                },
+              )
+            : gt("Last run {when}. {bytes} recovered.", {
                 when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
                 bytes: formatBytes(report.bytesFreed),
-              },
-            )
-          : gt("Last run {when}. {bytes} recovered.", {
-              when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
-              bytes: formatBytes(report.bytesFreed),
-            })
-        : query?.failed
-          ? gt("Could not load the last run.")
-          : query?.loading
-            ? gt("Loading last run…")
-            : gt("Cleanup hasn't run yet."),
+              })
+          : query?.failed
+            ? gt("Could not load the last run.")
+            : query?.loading
+              ? gt("Loading last run…")
+              : gt("Cleanup hasn't run yet."),
     };
   });
   const deleteNow = async () => {

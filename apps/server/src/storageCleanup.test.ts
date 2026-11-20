@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { SCAN_CACHE_FILE_NAME } from "./usage/usageScanCache.ts";
 import { TestClock } from "effect/testing";
@@ -22,6 +23,7 @@ import * as Sqlite from "./persistence/Sqlite.ts";
 import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointService.ts";
 import {
   DEFAULT_SERVER_SETTINGS,
+  StorageCleanupReport,
   type WorktreeKeepWhen,
   type StorageCleanupSettings,
   type TerminalMetadataStreamEvent,
@@ -3969,6 +3971,18 @@ it.effect("keeps saved usage data when removing a settled checkout", () =>
   ),
 );
 
+// The report's entries as clients that predate thread cleanup decode them.
+const decodeOlderReport = Schema.decodeUnknownSync(
+  Schema.toCodecJson(
+    Schema.Struct({
+      entries: Schema.Array(
+        Schema.Struct({ kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]) }),
+      ),
+    }),
+  ),
+);
+const encodeReport = Schema.encodeSync(Schema.toCodecJson(StorageCleanupReport));
+
 describe("settled and archived thread cleanup", () => {
   const settled = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
     shell({
@@ -4076,6 +4090,7 @@ describe("settled and archived thread cleanup", () => {
           "archived-parent-side-chat",
         ]);
         const report = yield* firstReport(fixture);
+        expect(() => decodeOlderReport(encodeReport(report))).not.toThrow();
         expect(fixture.dispatched()).toMatchObject([
           {
             type: "thread.delete",
@@ -4089,7 +4104,7 @@ describe("settled and archived thread cleanup", () => {
             sideChatsUnchangedSince: at(-30 * DAY_MS),
           },
         ]);
-        expect(report.entries.filter((entry) => entry.kind === "thread")).toMatchObject([
+        expect(report.threads).toMatchObject([
           {
             threadId: "archived-expired",
             outcome: "removed",
@@ -4155,7 +4170,7 @@ describe("settled and archived thread cleanup", () => {
         expect(archived).toHaveLength(100);
         expect(archived[0]).toBe("settled-100");
         expect(archived).not.toContain("settled-0");
-        const entries = report.entries.filter((entry) => entry.kind === "thread");
+        const entries = report.threads ?? [];
         expect(entries.filter((entry) => entry.outcome === "removed")).toHaveLength(99);
         expect(entries.filter((entry) => entry.outcome === "kept")).toMatchObject([
           { threadId: "settled-100", reason: "Thread settled-100 changed before it was archived." },
