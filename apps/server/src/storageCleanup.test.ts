@@ -4035,6 +4035,8 @@ describe("settled and archived thread cleanup", () => {
             snoozedUntil: at(-60 * 60 * 1_000),
             snoozedAt: at(-31 * DAY_MS),
           }),
+          // Marking a woken thread unread clears the snooze and keeps updatedAt.
+          settled("settled-woken-then-unread", { lastSnoozeWakeAt: at(-60 * 60 * 1_000) }),
           settled("settled-running", { status: "running" }),
           settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
           openPullRequest,

@@ -1756,11 +1756,14 @@ const make = Effect.gen(function* () {
         !isSnoozed(thread, now),
     );
     // Like auto-settle, a snooze ending counts as activity.
-    const settledSinceMs = (thread: OrchestrationV2ThreadShell) => {
-      const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
-      const snoozedUntilMs = thread.snoozedUntil ? DateTime.toEpochMillis(thread.snoozedUntil) : 0;
-      return snoozedUntilMs <= now ? Math.max(updatedAtMs, snoozedUntilMs) : updatedAtMs;
-    };
+    const settledSinceMs = (thread: OrchestrationV2ThreadShell) =>
+      Math.max(
+        DateTime.toEpochMillis(thread.updatedAt),
+        ...[thread.lastSnoozeWakeAt, thread.snoozedUntil]
+          .filter((at) => at != null)
+          .map(DateTime.toEpochMillis)
+          .filter((ms) => ms <= now),
+      );
     const settled = oldestExpired(
       settledThreadsAfterDays,
       settledCandidates.filter((thread) => keptPullRequests(thread).length === 0),
