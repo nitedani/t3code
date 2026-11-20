@@ -3185,6 +3185,8 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     /** Rejects the archive once the thread changed after this updatedAt. */
     expectedUpdatedAt: Schema.optional(Schema.DateTimeUtc),
+    /** Rejects the archive while a side chat it would take is working or changed after this time. */
+    sideChatsUnchangedSince: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.close"),

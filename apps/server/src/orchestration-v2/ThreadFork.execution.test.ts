@@ -1486,17 +1486,24 @@ it.effect(
         text: "Parent work",
         stable: true,
       });
+      const beforeSideChat = yield* DateTime.now;
+      yield* TestClock.adjust("1 second");
       yield* forkSideChat("guarded-cleanup-fork", parentId, sideChatId);
       const thread = (threadId: ThreadId) =>
         orchestrator
           .getThreadProjection(threadId)
           .pipe(Effect.map((projection) => projection.thread));
-      const archive = (commandId: string, expectedUpdatedAt?: DateTime.Utc) =>
+      const archive = (
+        commandId: string,
+        expectedUpdatedAt?: DateTime.Utc,
+        sideChatsUnchangedSince?: DateTime.Utc,
+      ) =>
         orchestrator.dispatch({
           type: "thread.archive",
           commandId: CommandId.make(commandId),
           threadId: parentId,
           ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
+          ...(sideChatsUnchangedSince === undefined ? {} : { sideChatsUnchangedSince }),
         });
       const remove = (commandId: string, expectedArchivedAt: DateTime.Utc) =>
         orchestrator.dispatch({
@@ -1517,7 +1524,19 @@ it.effect(
       assert.include(String(stale.cause), "changed before it was archived");
       assert.isNull((yield* thread(parentId)).archivedAt);
 
-      yield* archive("guarded-cleanup-archive", (yield* thread(parentId)).updatedAt);
+      const sideChatChanged = yield* archive(
+        "guarded-cleanup-archive-side-chat-changed",
+        (yield* thread(parentId)).updatedAt,
+        beforeSideChat,
+      ).pipe(Effect.flip);
+      assert.include(String(sideChatChanged.cause), "has a side chat in use");
+      assert.isNull((yield* thread(sideChatId)).archivedAt);
+
+      yield* archive(
+        "guarded-cleanup-archive",
+        (yield* thread(parentId)).updatedAt,
+        yield* DateTime.now,
+      );
       const firstArchivedAt = (yield* thread(parentId)).archivedAt!;
       assert.isNotNull((yield* thread(sideChatId)).archivedAt);
 
@@ -1539,6 +1558,54 @@ it.effect(
       assert.isNotNull((yield* thread(parentId)).deletedAt);
       assert.isNotNull((yield* thread(sideChatId)).deletedAt);
     }).pipe(Effect.provide(forkCases[0]!.layer)),
+);
+
+it.effect("a guarded archive keeps a settled parent whose side chat is working", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const parentId = ThreadId.make("working-side-chat-parent");
+    const sideChatId = ThreadId.make("working-side-chat");
+    yield* createParent(parentId);
+    yield* writeParentRun({
+      threadId: parentId,
+      runId: RunId.make("working-side-chat-parent-run"),
+      ordinal: 1,
+      status: "completed",
+      text: "Parent work",
+      stable: true,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("working-side-chat-settle"),
+      threadId: parentId,
+    });
+    yield* TestClock.adjust("31 days");
+    yield* forkSideChat("working-side-chat-fork", parentId, sideChatId);
+    yield* askSideChat(sideChatId, "working-side-chat-ask");
+    const thread = (threadId: ThreadId) =>
+      orchestrator
+        .getThreadProjection(threadId)
+        .pipe(Effect.map((projection) => projection.thread));
+    const now = yield* DateTime.now;
+    const archive = (commandId: string, sideChatsUnchangedSince: DateTime.Utc) =>
+      Effect.gen(function* () {
+        return yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make(commandId),
+          threadId: parentId,
+          expectedUpdatedAt: (yield* thread(parentId)).updatedAt,
+          sideChatsUnchangedSince,
+        });
+      }).pipe(Effect.flip);
+
+    const swept = yield* archive("working-side-chat-sweep", DateTime.subtract(now, { days: 30 }));
+    assert.include(String(swept.cause), "has a side chat in use");
+    // Nothing changed after this cutoff, so only the side chat's run keeps the parent.
+    const working = yield* archive("working-side-chat-now", now);
+    assert.include(String(working.cause), "has a side chat in use");
+    assert.isNull((yield* thread(parentId)).archivedAt);
+    assert.isNull((yield* thread(sideChatId)).archivedAt);
+  }).pipe(Effect.provide(forkCases[0]!.layer)),
 );
 
 it.effect("a side chat opened during the parent's first turn starts from a digest", () =>

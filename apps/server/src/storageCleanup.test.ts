@@ -4050,6 +4050,7 @@ describe("settled and archived thread cleanup", () => {
             type: "thread.archive",
             threadId: "settled-expired",
             expectedUpdatedAt: at(-31 * DAY_MS),
+            sideChatsUnchangedSince: at(-30 * DAY_MS),
           },
         ]);
         expect(report.entries.filter((entry) => entry.kind === "thread")).toMatchObject([

@@ -15564,6 +15564,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             cause: `Thread ${command.threadId} changed before it was archived.`,
           });
         }
+        if (command.type === "thread.archive" && command.sideChatsUnchangedSince !== undefined) {
+          const cutoff = DateTime.toEpochMillis(command.sideChatsUnchangedSince);
+          for (const threadId of sideChatIds) {
+            const sideChat = yield* findThread(threadId);
+            if (sideChat === null || sideChat.archivedAt !== null) continue;
+            const records = yield* projectionStore
+              .getThreadRecords(threadId, ["runs", "runtimeRequests"])
+              .pipe(mapDispatchError(command));
+            if (
+              DateTime.toEpochMillis(sideChat.updatedAt) > cutoff ||
+              threadHasUnfinishedWork(records)
+            ) {
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: `Thread ${command.threadId} has a side chat in use.`,
+              });
+            }
+          }
+        }
         const parentArchivedAt = parent?.archivedAt ?? null;
         yield* dispatchThreadMutation(command, events, effects);
         // Unarchive restores the side chats this parent's archive took, not ones archived before it.

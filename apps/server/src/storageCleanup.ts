@@ -1817,6 +1817,7 @@ const make = Effect.gen(function* () {
           commandId: yield* commandId(thread),
           threadId: thread.id,
           expectedUpdatedAt: thread.updatedAt,
+          sideChatsUnchangedSince: DateTime.makeUnsafe(now - settledThreadsAfterDays! * DAY_MS),
         },
         `Archived after ${settledThreadsAfterDays} days settled`,
       );
