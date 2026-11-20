@@ -879,8 +879,6 @@ function StorageRetentionRow({
   setting,
   title,
   description,
-  settings,
-  targets,
 }: {
   setting:
     | "browserArtifactsAfterDays"
@@ -889,11 +887,10 @@ function StorageRetentionRow({
     | "archivedThreadsAfterDays";
   title: string;
   description: string;
-  settings: StorageCleanupSettings;
-  targets: readonly ScopedSettingsTarget[];
 }) {
   const gt = useGT();
-  const value = settings[setting];
+  const { targets } = useSettingsScope();
+  const value = useScopedSettings((settings) => settings.storageCleanup[setting]);
   const updateSettings = useUpdateScopedSettings();
   const targetIdsKey = environmentIdsKey(targets.map((target) => target.environmentId).sort());
   const mixed =
@@ -929,8 +926,7 @@ function StorageRetentionRow({
 /** Retention for logs and captures, and the manual cleanup run, which covers worktrees too. */
 export function StorageCleanupSections() {
   const gt = useGT();
-  const { scope, connectedEnvironments, targets } = useSettingsScope();
-  const settings = useScopedSettings().storageCleanup;
+  const { scope, connectedEnvironments } = useSettingsScope();
   if (scope.kind === "project" || scope.kind === "checkout") return null;
   const databaseStorageNotice = (
     <DatabaseStorageNotice
@@ -957,8 +953,6 @@ export function StorageCleanupSections() {
       <SettingsSection id="storage-artifacts" title={gt("Artifacts and logs")}>
         <StorageRetentionRow
           setting="browserArtifactsAfterDays"
-          settings={settings}
-          targets={targets}
           title={gt("Delete old browser artifacts")}
           description={gt(
             "Delete saved browser captures after this many days. Older capture links will no longer open.",
@@ -966,8 +960,6 @@ export function StorageCleanupSections() {
         />
         <StorageRetentionRow
           setting="logsAfterDays"
-          settings={settings}
-          targets={targets}
           title={gt("Delete old rotated logs")}
           description={gt(
             "Delete inactive rotated log files after this many days. Current logs are kept.",
@@ -977,8 +969,6 @@ export function StorageCleanupSections() {
       <SettingsSection id="storage-threads" title={gt("Settled and archived threads")}>
         <StorageRetentionRow
           setting="settledThreadsAfterDays"
-          settings={settings}
-          targets={targets}
           title={gt("Archive settled threads")}
           description={gt(
             "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
@@ -986,8 +976,6 @@ export function StorageCleanupSections() {
         />
         <StorageRetentionRow
           setting="archivedThreadsAfterDays"
-          settings={settings}
-          targets={targets}
           title={gt("Delete archived threads")}
           description={gt(
             "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",

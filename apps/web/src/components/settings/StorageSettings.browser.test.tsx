@@ -1,7 +1,7 @@
 import { act, fakeTimers, render, type Screen } from "../../../test/render";
 import { RegistryProvider } from "@effect/atom-react";
 import { DEFAULT_SERVER_SETTINGS, type StorageCleanupReport } from "@t3tools/contracts";
-import { type ReactNode } from "react";
+import { createContext, type ReactNode, useContext } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
@@ -39,6 +39,7 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
 vi.mock(import("./SettingsScopeContext"), async (original) => ({
   ...(await original()),
   useSettingsScope: (() => {
+    useContext(ScopeRender);
     const environments = state.targets.map(({ environmentId, settings }) => ({
       environmentId,
       label: environmentId,
@@ -64,7 +65,8 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
 }));
 vi.mock(import("./useScopedSettings"), async (original) => ({
   ...(await original()),
-  useScopedSettings: (() => state.settings) as never,
+  useScopedSettings: ((selector?: (settings: typeof state.settings) => unknown) =>
+    selector ? selector(state.settings) : state.settings) as never,
   useScopedSettingsMixed: () => false,
   useUpdateScopedSettings: () => state.update,
   useClearScopedSettings: () => vi.fn(),
@@ -141,9 +143,13 @@ function setRetentionValues(
   state.settings = state.targets[0]?.settings ?? state.settings;
 }
 
+// Each render is a new scope value, as a settings change is in the app, so scope readers re-render.
+const ScopeRender = createContext({});
 const panel = () => (
   <RegistryProvider>
-    <StorageCleanupSections />
+    <ScopeRender.Provider value={{}}>
+      <StorageCleanupSections />
+    </ScopeRender.Provider>
   </RegistryProvider>
 );
 const deleteButton = (container: HTMLElement) =>
