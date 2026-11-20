@@ -118,6 +118,8 @@ describe("serverSettings helpers", () => {
       worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: 30,
+      settledThreadsAfterDays: null,
+      archivedThreadsAfterDays: null,
     });
   });
   it("replaces a source control host's patched field so a cleared account pin does not survive", () => {

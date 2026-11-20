@@ -4,6 +4,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import type * as Digest from "effect/crypto/Digest";
+import type * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -373,6 +374,8 @@ const cleanupFixture = (
     let snapshotReads = 0;
     let terminalListener: ((event: TerminalMetadataStreamEvent) => Effect.Effect<void>) | undefined;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
+    const dispatched: OrchestrationV2ServerCommand[] = [];
+    let changedThreadIds: ThreadId[] = [];
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -471,6 +474,19 @@ const cleanupFixture = (
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
+        dispatch: (command: OrchestrationV2ServerCommand) =>
+          Effect.suspend(() => {
+            dispatched.push(command);
+            return "threadId" in command && changedThreadIds.includes(command.threadId)
+              ? Effect.fail(
+                  new Orchestrator.OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: `Thread ${command.threadId} changed before it was archived.`,
+                  }),
+                )
+              : Effect.succeed({ sequence: 0, storedEvents: [] });
+          }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(
         SqlClient.SqlClient,
@@ -574,6 +590,10 @@ const cleanupFixture = (
         threads = next;
       },
       threadBranches: () => threads.map((thread) => thread.branch),
+      dispatched: () => dispatched,
+      changeBeforeDispatch: (threadIds: ThreadId[]) => {
+        changedThreadIds = threadIds;
+      },
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
       },
@@ -665,6 +685,7 @@ const runCleanupTest = <A, E>(
     E,
     | FileSystem.FileSystem
     | Digest.Digest
+    | SecureRandom.SecureRandom
     | ServerConfig.ServerConfig
     | GitVcsDriver.GitVcsDriver
     | Path.Path
@@ -3941,3 +3962,145 @@ it.effect("keeps saved usage data when removing a settled checkout", () =>
     }),
   ),
 );
+
+describe("settled and archived thread cleanup", () => {
+  const settled = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+    shell({
+      id: ThreadId.make(id),
+      lineage: {
+        rootThreadId: ThreadId.make(id),
+        parentThreadId: null,
+        relationshipToParent: null,
+      },
+      settledOverride: "settled",
+      settledAt: at(-40 * DAY_MS),
+      updatedAt: at(-31 * DAY_MS),
+      ...overrides,
+    });
+  const firstReport = (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+    Effect.gen(function* () {
+      yield* fixture.activate(Stream.empty);
+      const [report] = yield* fixture.service.reports.pipe(
+        Stream.filter((report) => report !== null),
+        Stream.take(1),
+        Stream.runCollect,
+      );
+      yield* fixture.service.drain;
+      return report!;
+    });
+
+  it.effect("archives idle settled threads and deletes archived ones past their retention", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+          archivedThreadsAfterDays: 7,
+        });
+        fixture.setSettings({ sidebarAutoSettleKeepPullRequests: true });
+        fixture.setThreads([
+          settled("settled-expired"),
+          settled("settled-recent", { updatedAt: at(-29 * DAY_MS) }),
+          settled("settled-snoozed", { snoozedUntil: at(DAY_MS), snoozedAt: at(-31 * DAY_MS) }),
+          settled("settled-running", { status: "running" }),
+          settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
+          settled("settled-open-pull-request", {
+            pullRequests: [
+              {
+                host: "example.test",
+                repository: "owner/repository",
+                number: 42,
+                url: "https://example.test/owner/repository/pull/42",
+                source: "manual",
+                linkedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+                snapshot: {
+                  state: "open",
+                  title: "Pull request",
+                  headBranch: "feature",
+                  baseBranch: "main",
+                  isDraft: false,
+                  updatedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+                  syncedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+                },
+                stack: null,
+              },
+            ],
+          }),
+          settled("settled-side-chat", {
+            lineage: {
+              rootThreadId: ThreadId.make("settled-expired"),
+              parentThreadId: ThreadId.make("settled-expired"),
+              relationshipToParent: "fork",
+              sideChat: true,
+            },
+          }),
+          settled("active-expired", { settledOverride: null, settledAt: null }),
+          settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
+        ]);
+        const report = yield* firstReport(fixture);
+        expect(fixture.dispatched()).toMatchObject([
+          {
+            type: "thread.delete",
+            threadId: "archived-expired",
+            expectedArchivedAt: at(-8 * DAY_MS),
+          },
+          {
+            type: "thread.archive",
+            threadId: "settled-expired",
+            expectedUpdatedAt: at(-31 * DAY_MS),
+          },
+        ]);
+        expect(report.entries.filter((entry) => entry.kind === "thread")).toMatchObject([
+          {
+            threadId: "archived-expired",
+            outcome: "removed",
+            reason: "Deleted after 7 days archived",
+          },
+          {
+            threadId: "settled-expired",
+            outcome: "removed",
+            reason: "Archived after 30 days settled",
+          },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("is off by default, then archives the 100 oldest threads a sweep", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture(DEFAULT_SERVER_SETTINGS.storageCleanup);
+        fixture.setThreads(
+          Array.from({ length: 101 }, (_, index) =>
+            settled(`settled-${index}`, { updatedAt: at(-(31 + index) * DAY_MS) }),
+          ),
+        );
+        yield* firstReport(fixture);
+        expect(fixture.dispatched()).toEqual([]);
+
+        fixture.setSettings({
+          storageCleanup: {
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            settledThreadsAfterDays: 30,
+          },
+        });
+        fixture.changeBeforeDispatch([ThreadId.make("settled-100")]);
+        const report = yield* fixture.service.runNow;
+        const archived = fixture
+          .dispatched()
+          .map((command) => ("threadId" in command ? command.threadId : null));
+        expect(archived).toHaveLength(100);
+        expect(archived[0]).toBe("settled-100");
+        expect(archived).not.toContain("settled-0");
+        const entries = report.entries.filter((entry) => entry.kind === "thread");
+        expect(entries.filter((entry) => entry.outcome === "removed")).toHaveLength(99);
+        expect(entries.filter((entry) => entry.outcome === "kept")).toMatchObject([
+          { threadId: "settled-100", reason: "Thread settled-100 changed before it was archived." },
+        ]);
+      }),
+    ),
+  );
+});

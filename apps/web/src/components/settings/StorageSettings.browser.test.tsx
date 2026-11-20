@@ -108,6 +108,8 @@ function setup() {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      settledThreadsAfterDays: null,
+      archivedThreadsAfterDays: null,
     },
     projectSettingsOverrides: {},
   };

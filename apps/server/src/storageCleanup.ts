@@ -2,14 +2,18 @@
 import * as NodeFSP from "node:fs/promises";
 import {
   CheckpointScopeId,
+  CommandId,
   GitCommandError,
+  isListedThreadLineage,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
+  OrchestrationV2ServerCommand,
   OrchestrationV2ThreadShell,
   ProjectId,
   ServerSettings,
@@ -20,7 +24,7 @@ import type {
   StorageCleanupReportEntry,
   ThreadId,
 } from "@t3tools/contracts";
-import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
+import { resolveProjectSettings, resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
@@ -50,7 +54,7 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointService.ts";
-import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
+import { isSnoozed, threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
 import { MAX_OVERDUE_ARM_MS } from "./orchestration-v2/UsageLimitRecoveryWorker.ts";
 import * as WorktreeBranchSync from "./orchestration-v2/WorktreeBranchSync.ts";
 import { forkParked } from "./serverActivation.ts";
@@ -105,6 +109,8 @@ const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
+// Each deletion requests another sweep, so a large backlog drains a batch at a time.
+const THREADS_PER_SWEEP = 100;
 const isGitCommandError = Schema.is(GitCommandError);
 const errorCode = (error: PlatformError) =>
   error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
@@ -323,6 +329,7 @@ const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const random = yield* SecureRandom.SecureRandom;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -1707,6 +1714,115 @@ const make = Effect.gen(function* () {
     return removed;
   });
 
+  const cleanThreads = Effect.fn("StorageCleanup.cleanThreads")(function* (
+    serverSettings: ServerSettings,
+    now: number,
+    entries: StorageCleanupReportEntry[],
+  ) {
+    const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
+    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
+    const { projects, threads } = yield* readThreads();
+    // Side chats and subagents follow their parent.
+    const idle = threads.filter(
+      (thread) => isListedThreadLineage(thread.lineage) && threadIdle(thread, now, serverSettings),
+    );
+    const oldestExpired = (
+      days: number | null,
+      since: (thread: OrchestrationV2ThreadShell) => DateTime.Utc | null,
+    ) =>
+      days === null
+        ? []
+        : idle
+            .flatMap((thread) => {
+              const at = since(thread);
+              const sinceMs = at === null ? null : DateTime.toEpochMillis(at);
+              return sinceMs !== null && sinceMs <= now - days * DAY_MS
+                ? [{ thread, sinceMs }]
+                : [];
+            })
+            .toSorted((left, right) => left.sinceMs - right.sinceMs)
+            .slice(0, THREADS_PER_SWEEP)
+            .map(({ thread }) => thread);
+    // Like auto-settle, a project that keeps pull requests keeps a thread whose pull request is open.
+    const keepsPullRequest = (thread: OrchestrationV2ThreadShell) =>
+      resolveProjectSettings(serverSettings, thread.projectId).settings
+        .sidebarAutoSettleKeepPullRequests &&
+      (thread.pullRequests ?? []).some((link) => link.snapshot?.state === "open");
+    const settled = oldestExpired(settledThreadsAfterDays, (thread) =>
+      thread.archivedAt === null &&
+      thread.settledOverride === "settled" &&
+      thread.settledAt !== null &&
+      thread.pinnedAt == null &&
+      !isSnoozed(thread, now) &&
+      !keepsPullRequest(thread)
+        ? thread.updatedAt
+        : null,
+    );
+    const archived = oldestExpired(archivedThreadsAfterDays, (thread) => thread.archivedAt);
+    const apply = Effect.fnUntraced(function* (
+      thread: OrchestrationV2ThreadShell,
+      command: OrchestrationV2ServerCommand,
+      reason: string,
+    ) {
+      const entry = {
+        kind: "thread" as const,
+        path: null,
+        projectPath:
+          projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
+        threadId: thread.id,
+        threadTitle: thread.title,
+        bytes: null,
+        files: null,
+      };
+      yield* engine.dispatch(command).pipe(
+        Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
+        // The thread changed after this sweep read it.
+        Effect.catchTags({
+          OrchestratorDispatchError: (error) =>
+            Effect.sync(() =>
+              entries.push({
+                ...entry,
+                outcome: "kept",
+                reason: typeof error.cause === "string" ? error.cause : error.message,
+              }),
+            ),
+        }),
+        Effect.catch((error) =>
+          Effect.sync(() =>
+            entries.push({ ...entry, outcome: "failed", reason: cleanupFailureReason(error) }),
+          ),
+        ),
+      );
+    });
+    const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
+      return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
+    });
+    for (const thread of archived) {
+      yield* apply(
+        thread,
+        {
+          type: "thread.delete",
+          commandId: yield* commandId(thread),
+          threadId: thread.id,
+          expectedArchivedAt: thread.archivedAt!,
+        },
+        `Deleted after ${archivedThreadsAfterDays} days archived`,
+      );
+    }
+    for (const thread of settled) {
+      yield* apply(
+        thread,
+        {
+          type: "thread.archive",
+          commandId: yield* commandId(thread),
+          threadId: thread.id,
+          expectedUpdatedAt: thread.updatedAt,
+        },
+        `Archived after ${settledThreadsAfterDays} days settled`,
+      );
+    }
+  });
+
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
   const cleanCheckpointRefs = Effect.fn("StorageCleanup.cleanCheckpointRefs")(function* () {
     // Forks display their source history even after its thread is deleted. Keep
@@ -1831,6 +1947,24 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
+    yield* cleanThreads(serverSettings, now, entries).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          entries.push({
+            kind: "thread",
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            path: null,
+            projectPath: null,
+            threadId: null,
+            threadTitle: null,
+            bytes: null,
+            files: null,
+          });
+          yield* Effect.logWarning("thread cleanup failed", { error });
+        }),
+      ),
+    );
     yield* cleanCheckpointRefs().pipe(
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
     );
