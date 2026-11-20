@@ -13,7 +13,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as TestClock from "effect/testing/TestClock";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -173,30 +172,6 @@ it.effect("rejects guest messages until the link is redeemed and after archive",
       threadId,
     });
     assert.isNull((yield* projections.getThread(threadId)).guestShare ?? null);
-  }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect("an archive only of unshared threads keeps a thread until its guest link expires", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* setup;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const archive = (id: string) =>
-      orchestrator.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make(id),
-        threadId,
-        onlyIfUnshared: true,
-      });
-
-    const kept = yield* archive("archive-unshared-while-shared");
-    assert.lengthOf(kept.storedEvents, 0);
-    const shared = yield* projections.getThread(threadId);
-    assert.isNull(shared.archivedAt);
-    assert.equal(shared.guestShare?.id, shareId);
-
-    yield* TestClock.adjust("25 hours");
-    yield* archive("archive-unshared-after-expiry");
-    assert.isNotNull((yield* projections.getThread(threadId)).archivedAt);
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -3185,8 +3185,6 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     /** Rejects the archive once the thread changed after this updatedAt. */
     expectedUpdatedAt: Schema.optional(Schema.DateTimeUtc),
-    /** Archive only a thread without an open guest link; otherwise succeed without a change. */
-    onlyIfUnshared: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.close"),

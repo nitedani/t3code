@@ -376,7 +376,6 @@ const cleanupFixture = (
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const dispatched: OrchestrationV2ServerCommand[] = [];
     let changedThreadIds: ThreadId[] = [];
-    let sharedThreadIds: ThreadId[] = [];
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -486,13 +485,7 @@ const cleanupFixture = (
                     cause: `Thread ${command.threadId} changed before it was archived.`,
                   }),
                 )
-              : Effect.succeed({
-                  sequence: 0,
-                  storedEvents:
-                    "threadId" in command && sharedThreadIds.includes(command.threadId)
-                      ? []
-                      : [{ type: command.type }],
-                });
+              : Effect.succeed({ sequence: 0, storedEvents: [] });
           }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(
@@ -600,9 +593,6 @@ const cleanupFixture = (
       dispatched: () => dispatched,
       changeBeforeDispatch: (threadIds: ThreadId[]) => {
         changedThreadIds = threadIds;
-      },
-      shareBeforeDispatch: (threadIds: ThreadId[]) => {
-        sharedThreadIds = threadIds;
       },
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
@@ -4048,9 +4038,7 @@ describe("settled and archived thread cleanup", () => {
           settled("active-expired", { settledOverride: null, settledAt: null }),
           settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
-          settled("settled-shared", { updatedAt: at(-32 * DAY_MS) }),
         ]);
-        fixture.shareBeforeDispatch([ThreadId.make("settled-shared")]);
         const report = yield* firstReport(fixture);
         expect(fixture.dispatched()).toMatchObject([
           {
@@ -4060,15 +4048,8 @@ describe("settled and archived thread cleanup", () => {
           },
           {
             type: "thread.archive",
-            threadId: "settled-shared",
-            expectedUpdatedAt: at(-32 * DAY_MS),
-            onlyIfUnshared: true,
-          },
-          {
-            type: "thread.archive",
             threadId: "settled-expired",
             expectedUpdatedAt: at(-31 * DAY_MS),
-            onlyIfUnshared: true,
           },
         ]);
         expect(report.entries.filter((entry) => entry.kind === "thread")).toMatchObject([
@@ -4082,7 +4063,6 @@ describe("settled and archived thread cleanup", () => {
             outcome: "removed",
             reason: "Archived after 30 days settled",
           },
-          { threadId: "settled-shared", outcome: "kept", reason: "Shared with a guest" },
         ]);
       }),
     ),
