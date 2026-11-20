@@ -302,9 +302,11 @@ function CleanupResults({
             ? ((entry.threadId === null
                 ? entry.path
                 : entry.path?.split(/[\\/]/).findLast(Boolean)) ?? gt("Worktrees"))
-            : entry.kind === "logs"
-              ? gt("Rotated logs")
-              : gt("Browser artifacts");
+            : entry.kind === "thread"
+              ? gt("Threads")
+              : entry.kind === "logs"
+                ? gt("Rotated logs")
+                : gt("Browser artifacts");
         return (
           <SettingsRow
             key={`${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
@@ -436,6 +438,8 @@ function CleanupSection() {
     return (
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
+      settings.storageCleanup.settledThreadsAfterDays !== null ||
+      settings.storageCleanup.archivedThreadsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
       Object.values(settings.projectSettingsOverrides).some(
         (override) =>
@@ -878,7 +882,11 @@ function StorageRetentionRow({
   settings,
   targets,
 }: {
-  setting: "browserArtifactsAfterDays" | "logsAfterDays";
+  setting:
+    | "browserArtifactsAfterDays"
+    | "logsAfterDays"
+    | "settledThreadsAfterDays"
+    | "archivedThreadsAfterDays";
   title: string;
   description: string;
   settings: StorageCleanupSettings;
@@ -963,6 +971,26 @@ export function StorageCleanupSections() {
           title={gt("Delete old rotated logs")}
           description={gt(
             "Delete inactive rotated log files after this many days. Current logs are kept.",
+          )}
+        />
+      </SettingsSection>
+      <SettingsSection id="storage-threads" title={gt("Settled and archived threads")}>
+        <StorageRetentionRow
+          setting="settledThreadsAfterDays"
+          settings={settings}
+          targets={targets}
+          title={gt("Archive settled threads")}
+          description={gt(
+            "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
+          )}
+        />
+        <StorageRetentionRow
+          setting="archivedThreadsAfterDays"
+          settings={settings}
+          targets={targets}
+          title={gt("Delete archived threads")}
+          description={gt(
+            "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
           )}
         />
       </SettingsSection>

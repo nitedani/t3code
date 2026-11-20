@@ -12196,5 +12196,11 @@
   "27d76249d09eb69f": "Guide de revue prêt",
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
-  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue"
+  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
+  "6572f44f2b8f030d": "Fils clos et archivés",
+  "bdb22e8ed3dcdcf1": "Archiver les fils clos",
+  "40eb4974d8282a55": "Archiver un fil clos après ce nombre de jours sans modification. Le désarchiver le fait revenir.",
+  "7a240a7dc1cf6ac3": "Supprimer les fils archivés",
+  "a16843c5733a43bc": "Supprimer un fil après ce nombre de jours dans les archives, y compris ceux que vous avez archivés vous-même. Action irréversible.",
+  "b32e50d8961787d5": "archiver automatiquement fils clos supprimer fils archivés anciens nettoyage rétention jours"
 }

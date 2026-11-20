@@ -12196,5 +12196,11 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
+  "6572f44f2b8f030d": "Erledigte und archivierte Threads",
+  "bdb22e8ed3dcdcf1": "Erledigte Threads archivieren",
+  "40eb4974d8282a55": "Einen erledigten Thread nach so vielen Tagen ohne Änderungen archivieren. „Aus dem Archiv holen“ bringt ihn zurück.",
+  "7a240a7dc1cf6ac3": "Archivierte Threads löschen",
+  "a16843c5733a43bc": "Einen Thread nach so vielen Tagen im Archiv löschen, auch Threads, die du selbst archiviert hast. Das lässt sich nicht rückgängig machen.",
+  "b32e50d8961787d5": "automatisch archivieren erledigte Threads löschen archivierte Threads alt Bereinigung Aufbewahrung Tage"
 }

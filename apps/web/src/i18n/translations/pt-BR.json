@@ -12195,5 +12195,11 @@
   "27d76249d09eb69f": "Guia de revisão pronto",
   "faa3bb26abb39c93": "O guia de revisão falhou",
   "b7df38b7d8792d78": "Abrir guia",
-  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão"
+  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão",
+  "6572f44f2b8f030d": "Threads concluídas e arquivadas",
+  "bdb22e8ed3dcdcf1": "Arquivar threads concluídas",
+  "40eb4974d8282a55": "Arquiva uma thread concluída depois de tantos dias sem alterações. Desarquivar a traz de volta.",
+  "7a240a7dc1cf6ac3": "Excluir threads arquivadas",
+  "a16843c5733a43bc": "Exclui uma thread depois de tantos dias no arquivo, incluindo as que você mesmo arquivou. Não é possível desfazer.",
+  "b32e50d8961787d5": "arquivar automaticamente threads concluídas excluir threads arquivadas antigas limpeza retenção dias"
 }

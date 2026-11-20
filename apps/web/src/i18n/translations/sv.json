@@ -12203,5 +12203,11 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "6572f44f2b8f030d": "Klara och arkiverade trådar",
+  "bdb22e8ed3dcdcf1": "Arkivera klara trådar",
+  "40eb4974d8282a55": "Arkivera en klar tråd efter så här många dagar utan ändringar. Avarkivera den för att få tillbaka den.",
+  "7a240a7dc1cf6ac3": "Ta bort arkiverade trådar",
+  "a16843c5733a43bc": "Ta bort en tråd efter så här många dagar i arkivet, även trådar du själv har arkiverat. Det går inte att ångra.",
+  "b32e50d8961787d5": "automatiskt arkivera klara trådar ta bort arkiverade trådar gamla rensning lagring dagar"
 }
