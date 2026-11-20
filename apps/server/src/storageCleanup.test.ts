@@ -4058,8 +4058,23 @@ describe("settled and archived thread cleanup", () => {
           settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
           settled("settled-scheduled"),
           settled("archived-scheduled", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-parent-side-chat", {
+            lineage: {
+              rootThreadId: ThreadId.make("archived-parent"),
+              parentThreadId: ThreadId.make("archived-parent"),
+              relationshipToParent: "fork",
+              sideChat: true,
+            },
+            archivedAt: at(-8 * DAY_MS),
+          }),
         ]);
-        fixture.setScheduledThreadIds(["settled-scheduled", "archived-scheduled"]);
+        fixture.setScheduledThreadIds([
+          "settled-scheduled",
+          "archived-scheduled",
+          "settled-side-chat",
+          "archived-parent-side-chat",
+        ]);
         const report = yield* firstReport(fixture);
         expect(fixture.dispatched()).toMatchObject([
           {
@@ -4069,11 +4084,10 @@ describe("settled and archived thread cleanup", () => {
           },
           {
             type: "thread.archive",
-            threadId: "settled-expired",
+            threadId: "settled-dismissed-open",
             expectedUpdatedAt: at(-31 * DAY_MS),
             sideChatsUnchangedSince: at(-30 * DAY_MS),
           },
-          { type: "thread.archive", threadId: "settled-dismissed-open" },
         ]);
         expect(report.entries.filter((entry) => entry.kind === "thread")).toMatchObject([
           {
@@ -4082,11 +4096,10 @@ describe("settled and archived thread cleanup", () => {
             reason: "Deleted after 7 days archived",
           },
           {
-            threadId: "settled-expired",
+            threadId: "settled-dismissed-open",
             outcome: "removed",
             reason: "Archived after 30 days settled",
           },
-          { threadId: "settled-dismissed-open", outcome: "removed" },
         ]);
 
         // A settled thread's links are re-read only on request, so the sweep asks for the open one.
@@ -4108,7 +4121,7 @@ describe("settled and archived thread cleanup", () => {
           },
         ]);
         yield* fixture.service.runNow;
-        expect(fixture.dispatched().slice(3)).toMatchObject([
+        expect(fixture.dispatched().slice(2)).toMatchObject([
           { type: "thread.archive", threadId: "settled-open-pull-request" },
         ]);
       }),

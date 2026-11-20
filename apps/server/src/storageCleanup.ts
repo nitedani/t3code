@@ -349,13 +349,25 @@ function planThreadCleanup({
       !scheduledThreadIds.has(thread.id) &&
       threadIdle(thread, now, settings),
   );
+  // Deleting a parent takes all its side chats, and archiving it takes the unarchived ones.
+  const scheduledSideChats = threads.filter(
+    (thread) => thread.lineage.sideChat === true && scheduledThreadIds.has(thread.id),
+  );
+  const heldFromDeletion = new Set(
+    scheduledSideChats.map((sideChat) => sideChat.lineage.parentThreadId),
+  );
+  const heldFromArchive = new Set(
+    scheduledSideChats
+      .filter((sideChat) => sideChat.archivedAt === null)
+      .map((sideChat) => sideChat.lineage.parentThreadId),
+  );
   const deletions =
     archivedThreadsAfterDays === null
       ? []
       : oldestExpired(
           archivedThreadsAfterDays,
           idle.flatMap((thread) =>
-            thread.archivedAt === null
+            thread.archivedAt === null || heldFromDeletion.has(thread.id)
               ? []
               : [
                   {
@@ -388,7 +400,8 @@ function planThreadCleanup({
     thread.settledOverride === "settled" &&
     thread.settledAt !== null &&
     thread.pinnedAt == null &&
-    !isSnoozed(thread, now)
+    !isSnoozed(thread, now) &&
+    !heldFromArchive.has(thread.id)
       ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
       : [],
   );
