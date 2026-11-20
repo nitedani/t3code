@@ -3195,9 +3195,12 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.archive"),
     commandId: CommandId,
     threadId: ThreadId,
-    /** Rejects the archive once the thread changed after this updatedAt. */
+    /** Rejects the archive unless the thread's updatedAt still equals this. */
     expectedUpdatedAt: Schema.optional(Schema.DateTimeUtc),
-    /** Rejects the archive while a side chat it would take is working or changed after this time. */
+    /**
+     * Rejects the archive while a side chat it would take is working or changed after this time.
+     * A cutoff, not an exact updatedAt, since a side chat can appear after the caller read the thread.
+     */
     sideChatsUnchangedSince: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({

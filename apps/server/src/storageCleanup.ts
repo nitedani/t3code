@@ -111,7 +111,8 @@ const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
-// Each deletion requests another sweep, so a large backlog drains a batch at a time.
+// At most this many threads per rule per sweep. Each deletion requests another sweep,
+// so a deletion backlog drains faster than the hourly tick.
 const THREADS_PER_SWEEP = 100;
 const isGitCommandError = Schema.is(GitCommandError);
 const errorCode = (error: PlatformError) =>
@@ -1732,7 +1733,7 @@ const make = Effect.gen(function* () {
     const { projects, threads } = yield* readThreads();
     // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
     const scheduled = yield* readScheduledThreadIds();
-    // Side chats follow their parent.
+    // Side chats follow their parent; subagent threads are not cleaned.
     const idle = threads.filter(
       (thread) =>
         isListedThreadLineage(thread.lineage) &&
@@ -1752,7 +1753,7 @@ const make = Effect.gen(function* () {
             .toSorted((left, right) => left.sinceMs - right.sinceMs)
             .slice(0, THREADS_PER_SWEEP)
             .map(({ thread }) => thread);
-    // Like auto-settle, a project that keeps pull requests keeps a thread whose pull request is open.
+    // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
     const keptPullRequests = (thread: OrchestrationV2ThreadShell) =>
       resolveProjectSettings(serverSettings, thread.projectId).settings
         .sidebarAutoSettleKeepPullRequests
@@ -1768,7 +1769,7 @@ const make = Effect.gen(function* () {
         thread.pinnedAt == null &&
         !isSnoozed(thread, now),
     );
-    // Like auto-settle, a snooze ending counts as activity.
+    // A snooze ending counts as a change.
     const settledSinceMs = (thread: OrchestrationV2ThreadShell) =>
       Math.max(
         DateTime.toEpochMillis(thread.updatedAt),
@@ -1809,7 +1810,7 @@ const make = Effect.gen(function* () {
       };
       yield* engine.dispatch(command).pipe(
         Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
-        // The thread changed after this sweep read it.
+        // The orchestrator refused the command, usually because the thread changed after this sweep read it.
         Effect.catchTags({
           OrchestratorDispatchError: (error) =>
             Effect.sync(() =>
