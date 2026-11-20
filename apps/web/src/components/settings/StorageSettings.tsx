@@ -293,8 +293,19 @@ function cleanupCounts(report: StorageCleanupReport) {
   return counts;
 }
 
-/** Thread results in the entry shape, then the report's own entries. */
+/**
+ * Thread results in the entry shape, then the report's own entries, in the server's report order:
+ * failed, removed, kept worktrees no thread owns, then the rest, stable within each.
+ */
 function cleanupEntries(report: StorageCleanupReport) {
+  const priority = (entry: { outcome: string; kind: string; threadId: string | null }) =>
+    entry.outcome === "failed"
+      ? 0
+      : entry.outcome === "removed"
+        ? 1
+        : entry.kind === "worktree" && entry.threadId === null
+          ? 2
+          : 3;
   return [
     ...(report.threads ?? []).map((entry) => ({
       ...entry,
@@ -304,7 +315,7 @@ function cleanupEntries(report: StorageCleanupReport) {
       files: null,
     })),
     ...report.entries,
-  ];
+  ].toSorted((left, right) => priority(left) - priority(right));
 }
 
 function CleanupResults({

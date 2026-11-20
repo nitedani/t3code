@@ -206,6 +206,76 @@ it("shows a failed thread result from Delete now", async () => {
   );
 });
 
+it("lists Last run results failed, then removed, then kept", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, settledThreadsAfterDays: 30 },
+  };
+  state.targets = [{ environmentId: "env-a", settings: state.settings }];
+  state.report = {
+    trigger: "automatic",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    finishedAt: "2026-11-20T12:00:01.000Z",
+    entries: [
+      {
+        kind: "logs",
+        outcome: "failed",
+        reason: "Logs folder could not be read",
+        path: null,
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+        bytes: null,
+        files: null,
+      },
+      {
+        kind: "logs",
+        outcome: "removed",
+        reason: "Rotated logs past 14 days",
+        path: null,
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+        bytes: 2048,
+        files: 2,
+      },
+    ],
+    counts: { removed: 1, kept: 0, failed: 1 },
+    omittedCount: 0,
+    bytesFreed: 0,
+    threads: [
+      {
+        outcome: "removed",
+        reason: "Deleted after 7 days archived",
+        projectPath: null,
+        threadId: null,
+        threadTitle: "Old thread",
+      },
+      {
+        outcome: "kept",
+        reason: "Thread changed before it was archived.",
+        projectPath: null,
+        threadId: null,
+        threadTitle: "Busy thread",
+      },
+    ],
+  };
+  await using screen = await render(panel());
+
+  await userEvent.click(screen.getByRole("button", { name: /Last run/ }));
+  await expect.element(screen.getByText("Deleted after 7 days archived")).toBeInTheDocument();
+  const text = screen.container.querySelector("#storage-cleanup-last-run")!.textContent!;
+  const order = [
+    "Logs folder could not be read",
+    "Deleted after 7 days archived",
+    "Rotated logs past 14 days",
+    "Thread changed before it was archived.",
+  ].map((reason) => text.indexOf(reason));
+  expect(order).toEqual(order.toSorted((left, right) => left - right));
+  expect(Math.min(...order)).toBeGreaterThan(-1);
+});
+
 const rule = "Delete old browser artifacts";
 const ruleSwitch = (screen: Screen) => screen.getByRole("switch", { name: rule });
 const daysInput = (screen: Screen) => screen.getByLabelText(`${rule} in days`);
