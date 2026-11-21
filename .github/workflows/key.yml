@@ -219,24 +219,28 @@ jobs:
         run: |
           set -euo pipefail
           archive=t3-$VC-linux-x64.tar.gz recipe=$(cat build/recipe 2>/dev/null || echo ok)
-          mkdir release
-          jq -n --arg nightly "$V" --arg version "$VC" --arg recipe "$recipe" --argjson picks "$PICKS" --arg run "$RUN_URL" --rawfile states build/states '
-            ($states | split("\n") | map(select(. != "") | split(" ")
-              | {(.[0]): {state: .[1], cause: (.[2] | tonumber? // .)}}) | add) as $s
-            | [$picks[] | {pr, sha, res} + $s[.pr | tostring]] as $p
-            | {schema: 3, $nightly, $version, state: (if any($p[]; .state == "carried") then "built" else "not-built" end),
-               $recipe, picks: $p, $run}' > release/carry.json
-          cat release/carry.json
-          if [ "$(jq -r .state release/carry.json)" = built ]; then
-            mv "build/$archive" release/
-            (cd release && sha256sum "$archive") > release/SHA256SUMS
-          fi
           if gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -se --arg key "$KEY" --arg vc "$VC" 'any(add[];
             (.draft | not) and (.tag_name | startswith("c/\($key)/") and endswith("/v\($vc)")) and any(.assets[]; .name == "SHA256SUMS"))' >/dev/null; then
             echo "c/$KEY/*/v$VC: another run published it, kept"; exit 0
           fi
           # Each run attempt names its own release, since an immutable release's tag name can't be used again.
           tag=c/$KEY/r$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT/v$VC
+          mkdir release
+          jq -n --arg nightly "$V" --arg version "$VC" --arg recipe "$recipe" --argjson picks "$PICKS" --arg run "$RUN_URL" --rawfile states build/states '
+            ($states | split("\n") | map(select(. != "") | split(" ")
+              | {(.[0]): {state: .[1], cause: (.[2] | tonumber? // .)}}) | add) as $s
+            | [$picks[] | {pr, sha, res} + $s[.pr | tostring]] as $p
+            | {schema: 3, $nightly, $version, state: (if any($p[]; .state == "carried") then "built" else "not-built" end),
+               $recipe, picks: $p, $run}' > manifest.json
+          sums=''
+          if [ "$(jq -r .state manifest.json)" = built ]; then
+            mv "build/$archive" release/
+            (cd release && sha256sum "$archive") > release/SHA256SUMS
+            sums=$(sha256sum release/SHA256SUMS | cut -d' ' -f1)
+          fi
+          # The signed carry.json names its release and its SHA256SUMS, so files of two attempts can't be mixed.
+          jq --arg tag "$tag" --arg sums "$sums" '. + {$tag} + (if $sums == "" then {} else {sha256sums: $sums} end)' manifest.json > release/carry.json
+          cat release/carry.json
           gh release create "$tag" --draft --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "$(jq -r '[.picks[] | "#\(.pr)@\(.sha[:9]) \(.state)"] | join(", ")' release/carry.json) on $VC" \
             --notes-file release/carry.json release/*
