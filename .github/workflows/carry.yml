@@ -1,0 +1,256 @@
+name: carry
+# The dashboard finds its request's newest run by this name.
+run-name: "carry #${{ github.event.issue.number || 'nightly' }}"
+
+# Builds upstream T3 nightlies with the PRs each machine picked (README.md).
+on:
+  issues:
+    types: [opened, edited, reopened]
+  schedule:
+    # Both before t3-update's 04:30 Europe/Budapest run, summer and winter; the second retries what the first didn't build.
+    # The dashboard (claude-swap's carry.ts, nightDue) expects their run by 03:00 UTC, GitHub's delay included.
+    - cron: "50 0 * * *"
+    - cron: "50 1 * * *"
+  workflow_dispatch:
+
+permissions: {}
+# A pick's build could plant a cache entry that another key's build restores and runs.
+cache-mode: none
+
+# A newer edit of a request cancels that request's running or waiting run; scheduled and manual runs queue behind each other.
+concurrency:
+  group: carry-${{ github.event.issue.number || 'nightly' }}
+  cancel-in-progress: ${{ github.event_name == 'issues' }}
+
+env:
+  GH_REPO: ${{ github.repository }}
+  UPSTREAM: pingdotgg/t3code
+  # The machines' gh logins; other authors' issues are not requests.
+  REQUESTERS: '["nitedani","nitedani-agent"]'
+  # An upstream PR, or an own PR: this repo's <owner>/t3code#<n>, open and based on main.
+  PICK: "^pick ([1-9][0-9]{0,6}|[A-Za-z0-9-]+/t3code#[1-9][0-9]{0,6}) [0-9a-f]{40}( [0-9a-f]{40})?$"
+  # resolves <sha> <res> <tip>: res holds the pick, and its own first-parent line (what neither tip nor the pick has) starts
+  # with a merge and merges only the pick or code already in tip, so a resolution made over a pick that is gone can't bring
+  # it back. The plan's check and the build's apply (key.yml, which gets it from the plan) both run it.
+  RESOLVES: |
+    resolves() {
+      local sha=$1 res=$2 tip=$3 others parent lowest=''
+      git merge-base --is-ancestor "$sha" "$res" || return 1
+      while read -r _ _ others; do
+        lowest=$others
+        for parent in $others; do
+          [ "$parent" = "$sha" ] || git merge-base --is-ancestor "$parent" "$tip" || return 1
+        done
+      done < <(git rev-list --first-parent --parents "$res" "^$tip" "^$sha")
+      [ -n "$lowest" ]
+    }
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The request an issue event is for; a scheduled or manual run builds every request.
+      ISSUE: ${{ github.event.issue.number }}
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      keys: ${{ steps.plan.outputs.keys }}
+      work: ${{ steps.plan.outputs.work }}
+      resolves: ${{ steps.plan.outputs.resolves }}
+    steps:
+      - id: plan
+        name: Read the requests, what upstream says of each pick, and the newest nightly
+        run: |
+          set -euo pipefail
+          eval "$RESOLVES"
+          version=$(gh api "repos/$UPSTREAM/releases?per_page=50" --jq '[.[] | select(.draft | not)
+            | select(.tag_name | test("^v[0-9.]+-nightly\\.[0-9]{8}\\.[0-9]+$"))] | sort_by(.published_at) | last | .tag_name // "" | ltrimstr("v")')
+          [ -n "$version" ] || { echo "::error::no nightly release on $UPSTREAM"; exit 1; }
+          echo "newest nightly: $version"
+
+          # One pick (pr, sha, res) and its PR's facts. merged: its merge commit is in the nightly (upstream squash-merges,
+          # so the picked sha never is); an own pick never is. pinned: sha is the PR's. Fails on request #$n when
+          # the PR can't be read, or is an own PR not based on main or not open (closed, or merged into main).
+          facts() {
+            local pr=$1 sha=$2 res=$3 repo=$UPSTREAM num=$1 pull merged=false pinned=false
+            if [[ $pr == */* ]]; then repo=${pr%#*} num=${pr#*#}; fi
+            pull=$(gh api "repos/$repo/pulls/$num") || { echo "::error::#$n: can't read pull request $pr" >&2; return 1; }
+            if [ "$repo" != "$UPSTREAM" ] && [ "$(jq -r .state <<<"$pull")" != open ]; then
+              echo "::error::#$n: $pr is not open" >&2; return 1
+            elif [ "$repo" != "$UPSTREAM" ] && [ "$(jq -r .base.ref <<<"$pull")" != main ]; then
+              echo "::error::#$n: $pr is not based on main" >&2; return 1
+            fi
+            if [ "$repo" = "$UPSTREAM" ] && [ "$(jq -r .merged <<<"$pull")" = true ]; then
+              case $(gh api "repos/$UPSTREAM/compare/$(jq -r .merge_commit_sha <<<"$pull")...v$version" --jq .status) in
+                ahead | identical) merged=true ;;
+              esac
+            fi
+            # The commit list stops at 250 commits, which an own PR passes once a Resolve merges a nightly into it.
+            if [ "$(jq -r .head.sha <<<"$pull")" = "$sha" ] ||
+              gh api --paginate "repos/$repo/pulls/$num/commits?per_page=100" --jq '.[].sha' | grep -x "$sha" >/dev/null; then
+              pinned=true
+            fi
+            jq -c --arg pr "$pr" --arg sha "$sha" --arg res "$res" --argjson merged "$merged" --argjson pinned "$pinned" \
+              '{pr: ($pr | tonumber? // .), $sha, res: (if $res == "" then null else $res end), $merged, $pinned}' <<<"$pull"
+          }
+
+          # The build's apply as a merge-tree chain in a blobless clone, for the request with key $1: true when each pinned,
+          # unmerged pick merges onto the nightly over the picks before it. The dashboard checks a pick set the same way.
+          applies() {
+            local request pr sha res tip tree rc ok=0 GIT_DIR=$RUNNER_TEMP/check-$1
+            export GIT_DIR
+            request=$(jq -c --arg key "$1" '.[] | select(.key == $key)' requests.json)
+            git init -q --bare && git remote add origin "https://github.com/$UPSTREAM.git" &&
+              git fetch -q --filter=blob:none --no-tags origin "+refs/tags/v$version:refs/tags/v$version" &&
+              tip=$(git rev-parse "v$version^{commit}") || exit 1
+            while read -r pr sha res; do
+              # An own pick is fetched from this repo with its blobs, which upstream doesn't have.
+              case $pr in
+                */*) git fetch -q --no-tags "https://github.com/$GH_REPO.git" "$sha" ||
+                  { echo "::error::$pr: can't fetch $sha from $GH_REPO"; return 1; } ;;
+                *) git fetch -q --filter=blob:none --no-tags origin "$sha" || exit 1 ;;
+              esac
+              if [ -n "$res" ]; then
+                git fetch -q --no-tags "https://github.com/$GH_REPO.git" "$res" || echo "::warning::$res is not on $GH_REPO"
+                if ! resolves "$sha" "$res" "$tip"; then
+                  echo "::warning::#$pr: $res is not a resolution of $sha onto tonight's tree"; ok=1; continue
+                fi
+              fi
+              rc=0 && tree=$(git merge-tree --write-tree --no-messages "$tip" "${res:-$sha}") || rc=$?
+              case $rc in
+                0) tip=$(git -c user.name=carry -c user.email=carry@users.noreply.github.com commit-tree -p "$tip" -p "${res:-$sha}" -m "carry #$pr" "$tree") || exit 1 ;;
+                1) echo "::warning::#$pr: ${res:-$sha} conflicts with the nightly or an earlier pick"; ok=1 ;;
+                *) exit 1 ;;
+              esac
+            done < <(jq -r '.picks[] | select(.pinned and (.merged | not)) | "\(.pr) \(.sha) \(.res // "")"' <<<"$request")
+            return $ok
+          }
+
+          : > requests.jsonl
+          : > wanted
+          # Every valid request's key, whose releases prune keeps, also when its PRs can't be read tonight.
+          : > requested
+          gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" |
+            jq -c --argjson who "$REQUESTERS" '.[] | select(.pull_request == null and (.user.login | IN($who[]))) | {number, author: .user.login, body: (.body // "")}' > issues.jsonl
+          while IFS= read -r issue; do
+            n=$(jq -r .number <<<"$issue") author=$(jq -r .author <<<"$issue")
+            # Anyone with write here can edit any issue, so a body counts only as its author last saved it.
+            # shellcheck disable=SC2016 # the $ names are GraphQL variables
+            editor=$(gh api graphql -F n="$n" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='
+              query($owner: String!, $name: String!, $n: Int!) {
+                repository(owner: $owner, name: $name) { issue(number: $n) { author { login } editor { login } } }
+              }' --jq '.data.repository.issue | select(.editor != null and .editor.login != .author.login) | .editor.login')
+            if [ -n "$editor" ]; then echo "::error::#$n: the request was last edited by $editor, not its author $author; not built"; continue; fi
+            body=$(jq -r .body <<<"$issue" | tr -d '\r')
+            picks=$(grep -E "$PICK" <<<"$body" | LC_ALL=C sort -k2,2n) || true
+            if grep -vqE "$PICK|^\$" <<<"$body"; then echo "::error::#$n: a line is not 'pick <pr> <sha40> [<res40>]' or 'pick $GH_REPO#<pr> <sha40> [<res40>]'"; continue
+            elif grep -vqE "^(pick ([1-9][0-9]* |$GH_REPO#)|\$)" <<<"$picks"; then echo "::error::#$n: an own pick is not on $GH_REPO"; continue
+            elif [ "$(grep -c . <<<"$picks")" -gt 20 ]; then echo "::error::#$n: more than 20 picks"; continue
+            elif [ -n "$(cut -d' ' -f2 <<<"$picks" | uniq -d)" ]; then echo "::error::#$n: a PR is picked twice"; continue
+            fi
+            [ -n "$picks" ] || { echo "#$n: no picks"; continue; }
+            # t3-update computes the key with this same line.
+            key=$(printf '%s\n' "$picks" | sha256sum | cut -c1-16)
+            echo "#$n: key $key"
+            echo "$key" >> requested
+            found=$(while read -r _ pr sha res; do facts "$pr" "$sha" "$res" || exit; done <<<"$picks") || continue
+            jq -sc --arg key "$key" '{$key, picks: .}' <<<"$found" >> requests.jsonl
+            if [ -z "$ISSUE" ] || [ "$n" = "$ISSUE" ]; then echo "$key" >> wanted; fi
+          done < issues.jsonl
+
+          echo '[]' > work.json
+          jq -sc 'unique_by(.key)' requests.jsonl > requests.json
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -s add > releases.json
+          # A key is built only when every pick applies, since a machine installs only a build that carries all its picks: a
+          # pick that doesn't waits for a Resolve press. A key is built for this nightly once a release of it has SHA256SUMS;
+          # each run's release has its own tag, so a not-built key is built again. An issue event's run builds only its request.
+          mapfile -t keys < <(sort -u wanted)
+          for key in "${keys[@]}"; do
+            if jq -e --arg key "$key" --arg v "$version" 'any(.[]; (.draft | not) and (.tag_name | startswith("c/\($key)/") and endswith("/v\($v).c\($key)"))
+              and any(.assets[]; .name == "SHA256SUMS"))' releases.json >/dev/null; then
+              echo "c/$key/*/v$version.c$key: built"
+            elif ! applies "$key"; then
+              echo "::warning::c/$key/*/v$version.c$key: not built, since a pick doesn't apply"
+            else
+              jq -c --arg key "$key" --slurpfile r requests.json '. + [$r[0][] | select(.key == $key)]' work.json > w && mv w work.json
+            fi
+          done
+          {
+            echo "version=$version"
+            echo "keys=$(jq -nRc '[inputs] | unique' requested)"
+            echo "work=$(cat work.json)"
+            printf 'resolves<<EOF\n%s\nEOF\n' "$RESOLVES"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.key }}
+    needs: plan
+    if: needs.plan.outputs.work != '[]'
+    # An issue run and a scheduled or manual run may both build one key; they take turns, and the second keeps the release.
+    concurrency:
+      group: carry-key-${{ matrix.key }}
+      cancel-in-progress: false
+    # What key.yml's publish job uses; its build job, which runs the picks' code, gets none of it.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.work) }}
+    uses: ./.github/workflows/key.yml
+    with:
+      key: ${{ matrix.key }}
+      picks: ${{ toJSON(matrix.picks) }}
+      version: ${{ needs.plan.outputs.version }}
+      resolves: ${{ needs.plan.outputs.resolves }}
+
+  keepalive:
+    # GitHub disables a public repo's schedules after 60 days without activity; re-enabling the workflow needs no commit.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Keep the schedules enabled
+        run: |
+          set -euo pipefail
+          for workflow in carry.yml sync.yml; do gh api -X PUT "repos/$GH_REPO/actions/workflows/$workflow/enable"; done
+
+  prune:
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KEYS: ${{ needs.plan.outputs.keys }}
+    steps:
+      # A machine may be downloading a release a request no longer names, so none younger than a day goes. A draft is a
+      # publish that failed before its release went out.
+      - name: Keep the newest two releases of each requested key, and every release and draft younger than a day
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -rs --argjson keys "$KEYS" '
+            [add[] | select(.tag_name | startswith("c/"))] as $all
+            | ($all | map(select(.draft | not) | {tag: .tag_name, key: (.tag_name | split("/")[1]), at: .published_at})
+              | group_by(.key)[] | sort_by(.at) | reverse
+              | if .[0].key | IN($keys[]) then .[2:][] else .[] end
+              | select((.at | fromdateiso8601) < now - 86400) | "release \(.tag)"),
+              ($all[] | select(.draft and (.created_at | fromdateiso8601) < now - 86400) | "draft \(.id)")' |
+          while read -r kind release; do
+            echo "deleting $kind $release"
+            case $kind in
+              release) gh release delete "$release" --cleanup-tag --yes ;;
+              draft) gh api -X DELETE "repos/$GH_REPO/releases/$release" ;;
+            esac
+          done

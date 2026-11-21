@@ -1,0 +1,255 @@
+name: key
+# Builds one key of carry.yml's plan, then publishes and attests it (README.md). Machines install only what this file
+# attested on carry, so the job that runs the picks' code holds no token and no cache, and the job that holds them runs
+# no pick code.
+on:
+  workflow_call:
+    inputs:
+      key:
+        type: string
+        required: true
+      # The plan's picks of this key: [{pr, sha, res, merged, pinned}].
+      picks:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      # carry.yml's RESOLVES.
+      resolves:
+        type: string
+        required: true
+
+permissions: {}
+cache-mode: none
+
+env:
+  GH_REPO: ${{ github.repository }}
+  UPSTREAM: pingdotgg/t3code
+  KEY: ${{ inputs.key }}
+  PICKS: ${{ inputs.picks }}
+  V: ${{ inputs.version }}
+  # The carried build's own version: above V and below the next nightly, so it never shares V's install.
+  VC: ${{ inputs.version }}.c${{ inputs.key }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # room for a set that fails together: it is rebuilt as the nightly alone, then each pick over the kept ones, with more
+    # builds to name each failing pick's cause
+    timeout-minutes: 240
+    permissions: {}
+    env:
+      RESOLVES: ${{ inputs.resolves }}
+      INSTALL_ARGS: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      T3CODE_TELEMETRY_CHANNEL: dev
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out the nightly and fetch the picks
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/$UPSTREAM.git"
+          git fetch -q --filter=blob:none --no-tags origin "+refs/tags/v$V:refs/tags/v$V"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout -q --detach "v$V"
+          git config user.name carry
+          git config user.email carry@users.noreply.github.com
+          # An own pick is fetched from this repo with its blobs, which upstream doesn't have.
+          while read -r pr sha; do
+            case $pr in
+              */*) git fetch -q --no-tags "https://github.com/$GH_REPO.git" "$sha" ;;
+              *) git fetch -q --filter=blob:none --no-tags origin "$sha" ;;
+            esac
+          done < <(jq -r '.[] | select(.pinned and (.merged | not)) | "\(.pr) \(.sha)"' <<<"$PICKS")
+          # A resolution is read only from this repo, with its blobs, which upstream doesn't have.
+          for res in $(jq -r '.[] | select(.pinned and (.merged | not)) | .res // empty' <<<"$PICKS"); do
+            git fetch -q --no-tags "https://github.com/$GH_REPO.git" "$res" || echo "::warning::$res is not on $GH_REPO"
+          done
+          grep -E '^T3CODE_(CLERK_PUBLISHABLE_KEY|CLERK_JWT_TEMPLATE|CLERK_CLI_OAUTH_CLIENT_ID|RELAY_URL)=' .env.example >> "$GITHUB_ENV"
+
+      # From here: release.yml's build_bundle and release-desktop.yml's Linux x64 CLI archive, at the nightly.
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: ${{ env.INSTALL_ARGS }}
+
+      - name: Install patchelf
+        run: command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+
+      - name: Apply each pick, then build
+        run: |
+          set -uo pipefail
+          # Each line of $RUNNER_TEMP/states is "<pr> <state> [<cause>]"; a later line overrides an earlier one.
+          state() { echo "$*" >> "$RUNNER_TEMP/states"; }
+          for pr in $(jq -r '.[] | select(.merged) | .pr' <<<"$PICKS"); do state "$pr" merged; done
+          for pr in $(jq -r '.[] | select(.pinned or .merged | not) | .pr' <<<"$PICKS"); do state "$pr" unpinned; done
+
+          eval "$RESOLVES"
+          # The nightly with the picks merged in PR order, each by its resolution if it has one; one that conflicts is left
+          # out. applied: the picks merged; resolved: the shas of those merged by a resolution.
+          apply() {
+            local pr sha res
+            applied=() resolved=()
+            git checkout -qf --detach "v$V" && git clean -ffdxq -e node_modules || exit 1
+            for pr in "$@"; do
+              read -r sha res < <(jq -r --arg pr "$pr" '.[] | select(.pr | tostring == $pr) | "\(.sha) \(.res // "")"' <<<"$PICKS")
+              if [ -n "$res" ] && ! resolves "$sha" "$res" HEAD; then
+                echo "::warning::#$pr: $res is not a resolution of $sha onto tonight's tree"; state "$pr" doesnt-apply
+              elif git merge -q --no-edit -m "carry #$pr at $sha" "${res:-$sha}"; then
+                applied+=("$pr")
+                [ -z "$res" ] || resolved+=("$sha")
+              else git merge --abort; state "$pr" doesnt-apply
+              fi
+            done
+          }
+          # Each test file runs inside its own package with `vp test run <files>`, as upstream's windows-tests.yml runs chosen
+          # files: from the repo root its config loads every package's, apps/mobile's too, which this build doesn't install.
+          # A package this build doesn't install ships nothing in it, so its tests are skipped.
+          run_tests() {
+            local f d
+            local -A files=()
+            for f; do
+              d=$(dirname "$f")
+              while [ "$d" != . ] && [ ! -f "$d/package.json" ]; do d=$(dirname "$d"); done
+              files[$d]+=" ${f#"$d"/}"
+            done
+            for d in "${!files[@]}"; do
+              if [ ! -d "$d/node_modules" ]; then echo "not built here, tests skipped:${files[$d]}"; continue; fi
+              # shellcheck disable=SC2086 # each file is its own argument
+              (cd "$d" && vp test run ${files[$d]}) || return
+            done
+          }
+          # A probe build (probe=1) keeps no archive.
+          build() {
+            local tests sha
+            echo "::group::build: the nightly and ${applied[*]:-no pick}"
+            # The test files a resolved pick changes.
+            mapfile -t tests < <(for sha in "${resolved[@]}"; do git diff --name-only --diff-filter=d "v$V...$sha"; done | grep -E '\.test\.tsx?$' | sort -u)
+            # shellcheck disable=SC2086 # each filter is its own argument
+            vp install $INSTALL_ARGS &&
+              node scripts/update-release-package-versions.ts "$VC" &&
+              vp run --filter 't3...' --filter '@t3tools/web...' typecheck &&
+              run_tests "${tests[@]}" &&
+              vp run build:desktop:bundle &&
+              node scripts/apply-web-brand-assets.ts nightly apps/server/dist/client &&
+              cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu &&
+              mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64" &&
+              cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/" &&
+              node apps/server/scripts/cli.ts build-exe --verbose &&
+              node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$VC" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir release-cli &&
+              node scripts/smoke-cli-archive.ts --archive "release-cli/t3-$VC-linux-x64.tar.gz" --expect-version "$VC" &&
+              { [ -n "${probe-}" ] || cp "release-cli/t3-$VC-linux-x64.tar.gz" "$RUNNER_TEMP/"; }
+            local rc=$?
+            echo "::endgroup::"
+            return $rc
+          }
+          # Sets cause for pick $1, which doesn't build over the kept picks: alone when it fails over the nightly alone, else the
+          # last pick of a leading run of kept picks it fails over, found by halving the run.
+          blame() {
+            local lo=0 hi=${#kept[@]} mid
+            cause=alone
+            ((hi > 0)) || return 0
+            apply "$1"
+            if [ ${#applied[@]} -gt 0 ] && ! probe=1 build; then return 0; fi
+            while ((hi - lo > 1)); do
+              mid=$(((lo + hi) / 2))
+              apply "${kept[@]:0:mid}" "$1"
+              if [ ${#applied[@]} -gt "$mid" ] && ! probe=1 build; then hi=$mid; else lo=$mid; fi
+            done
+            cause=${kept[hi - 1]}
+          }
+
+          mapfile -t candidates < <(jq -r '.[] | select(.pinned and (.merged | not)) | .pr' <<<"$PICKS")
+          apply "${candidates[@]}"
+          if [ ${#applied[@]} -gt 0 ] && ! build; then
+            # The nightly alone, then in PR order each pick over the picks kept so far, which a resolution was made over;
+            # a pick is kept when that builds. The last build that passed left its archive in $RUNNER_TEMP.
+            together=("${applied[@]}") kept=()
+            for pr in "${together[@]}"; do state "$pr" doesnt-build; done
+            apply
+            if build; then
+              for pr in "${together[@]}"; do
+                apply "${kept[@]}" "$pr"
+                if [ ${#applied[@]} -gt ${#kept[@]} ]; then
+                  if build; then kept+=("$pr"); else blame "$pr"; state "$pr" doesnt-build "$cause"; fi
+                fi
+              done
+            else
+              echo broken > "$RUNNER_TEMP/recipe"
+            fi
+            applied=("${kept[@]}")
+          fi
+          for pr in "${applied[@]}"; do state "$pr" carried; done
+
+      - id: upload
+        name: Hand the states and the archive to the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ inputs.key }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/states
+            ${{ runner.temp }}/recipe
+            ${{ runner.temp }}/t3-${{ env.VC }}-linux-x64.tar.gz
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # By the build job's own artifact id: every job of the run can upload an artifact under any name.
+      - name: Download the build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: build
+          merge-multiple: true
+
+      - id: draft
+        name: Write carry.json and SHA256SUMS into a draft release
+        run: |
+          set -euo pipefail
+          archive=t3-$VC-linux-x64.tar.gz recipe=$(cat build/recipe 2>/dev/null || echo ok)
+          mkdir release
+          jq -n --arg nightly "$V" --arg version "$VC" --arg recipe "$recipe" --argjson picks "$PICKS" --arg run "$RUN_URL" --rawfile states build/states '
+            ($states | split("\n") | map(select(. != "") | split(" ")
+              | {(.[0]): {state: .[1], cause: (.[2] | tonumber? // .)}}) | add) as $s
+            | [$picks[] | {pr, sha, res} + $s[.pr | tostring]] as $p
+            | {schema: 3, $nightly, $version, state: (if any($p[]; .state == "carried") then "built" else "not-built" end),
+               $recipe, picks: $p, $run}' > release/carry.json
+          cat release/carry.json
+          if [ "$(jq -r .state release/carry.json)" = built ]; then
+            mv "build/$archive" release/
+            (cd release && sha256sum "$archive") > release/SHA256SUMS
+          fi
+          if gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -se --arg key "$KEY" --arg vc "$VC" 'any(add[];
+            (.draft | not) and (.tag_name | startswith("c/\($key)/") and endswith("/v\($vc)")) and any(.assets[]; .name == "SHA256SUMS"))' >/dev/null; then
+            echo "c/$KEY/*/v$VC: another run published it, kept"; exit 0
+          fi
+          # Each run attempt names its own release, since an immutable release's tag name can't be used again.
+          tag=c/$KEY/r$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT/v$VC
+          gh release create "$tag" --draft --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "$(jq -r '[.picks[] | "#\(.pr)@\(.sha[:9]) \(.state)"] | join(", ")' release/carry.json) on $VC" \
+            --notes-file release/carry.json release/*
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the release's files
+        if: steps.draft.outputs.tag != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
+      - name: Publish the release
+        if: steps.draft.outputs.tag != ''
+        env:
+          TAG: ${{ steps.draft.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false
