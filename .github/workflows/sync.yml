@@ -1,6 +1,6 @@
-# Keeps main equal to pingdotgg/t3code's main. Runs from fork-sync, this repo's default branch, so main carries no commit of
-# its own. SYNC_TOKEN: a fine-grained token with Contents and Workflows write on this repo; the built-in token can't move
-# main past an upstream commit that changes a workflow file.
+# Keeps main equal to pingdotgg/t3code's main. Runs from carry, this repo's default branch, so main carries no commit of
+# its own. SYNC_TOKEN: a fine-grained token with Contents and Workflows write on this repo, in the Environment sync, which
+# only carry can use; the built-in token can't move main past an upstream commit that changes a workflow file.
 name: Sync main with upstream
 on:
   schedule:
@@ -10,6 +10,7 @@ permissions: {}
 jobs:
   sync:
     runs-on: ubuntu-latest
+    environment: sync
     steps:
       - run: gh api -X POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
         env:
