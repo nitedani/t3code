@@ -1546,6 +1546,10 @@ it.effect(
         commandId: CommandId.make("guarded-cleanup-unarchive"),
         threadId: parentId,
       });
+      const unarchived = yield* remove("guarded-cleanup-delete-unarchived", firstArchivedAt).pipe(
+        Effect.flip,
+      );
+      assert.include(String(unarchived.cause), "unarchived or archived again");
       yield* TestClock.adjust("1 second");
       yield* archive("guarded-cleanup-rearchive");
       const rearchived = yield* remove("guarded-cleanup-delete-stale", firstArchivedAt).pipe(
@@ -1625,6 +1629,23 @@ it.effect("a guarded archive keeps a settled parent whose side chat is working",
     assert.include(String(working.cause), "has a side chat in use");
     assert.isNull((yield* thread(parentId)).archivedAt);
     assert.isNull((yield* thread(sideChatId)).archivedAt);
+
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("working-side-chat-archive"),
+      threadId: parentId,
+    });
+    assert.isNotNull((yield* thread(sideChatId)).archivedAt);
+    const removed = yield* orchestrator
+      .dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("working-side-chat-delete"),
+        threadId: parentId,
+        expectedArchivedAt: (yield* thread(parentId)).archivedAt!,
+      })
+      .pipe(Effect.flip);
+    assert.include(String(removed.cause), "has a side chat in use");
+    assert.isNull((yield* thread(sideChatId)).deletedAt);
   }).pipe(Effect.provide(forkCases[0]!.layer)),
 );
 
