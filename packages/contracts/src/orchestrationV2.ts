@@ -3317,7 +3317,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     /** Delete only a thread with no runs and no messages; otherwise succeed without a change. */
     onlyIfUnused: Schema.optional(Schema.Boolean),
-    /** Rejects the deletion unless the thread is still archived from this time. */
+    /** Rejects the deletion unless the thread is still archived from this time and so are its side chats, none working. */
     expectedArchivedAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({

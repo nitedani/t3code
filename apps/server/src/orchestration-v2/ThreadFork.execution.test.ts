@@ -1554,7 +1554,27 @@ it.effect(
       assert.include(String(rearchived.cause), "unarchived or archived again");
       assert.isNull((yield* thread(parentId)).deletedAt);
 
-      yield* remove("guarded-cleanup-delete", (yield* thread(parentId)).archivedAt!);
+      const archivedAt = (yield* thread(parentId)).archivedAt!;
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("guarded-cleanup-unarchive-side-chat"),
+        threadId: sideChatId,
+      });
+      const sideChatBack = yield* remove("guarded-cleanup-delete-side-chat-back", archivedAt).pipe(
+        Effect.flip,
+      );
+      assert.include(String(sideChatBack.cause), "has a side chat in use");
+      assert.deepStrictEqual(
+        [(yield* thread(parentId)).deletedAt, (yield* thread(sideChatId)).deletedAt],
+        [null, null],
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("guarded-cleanup-rearchive-side-chat"),
+        threadId: sideChatId,
+      });
+
+      yield* remove("guarded-cleanup-delete", archivedAt);
       assert.isNotNull((yield* thread(parentId)).deletedAt);
       assert.isNotNull((yield* thread(sideChatId)).deletedAt);
     }).pipe(Effect.provide(forkCases[0]!.layer)),

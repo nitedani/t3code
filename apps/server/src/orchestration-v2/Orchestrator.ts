@@ -15711,6 +15711,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               cause: `Thread ${command.threadId} was unarchived or archived again.`,
             });
           }
+          for (const threadId of sideChatIds) {
+            const sideChat = yield* findThread(threadId);
+            if (sideChat === null) continue;
+            const records = yield* projectionStore
+              .getThreadRecords(threadId, ["runs", "runtimeRequests"])
+              .pipe(mapDispatchError(command));
+            if (sideChat.archivedAt === null || threadHasUnfinishedWork(records)) {
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: `Thread ${command.threadId} has a side chat in use.`,
+              });
+            }
+          }
         }
         // Checked under the thread lock: a message sent since the client looked keeps the thread.
         if (command.onlyIfUnused === true) {
