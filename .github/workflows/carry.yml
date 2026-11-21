@@ -69,6 +69,7 @@ jobs:
       attestations: read
       contents: read
       issues: read
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       # The request an issue event is for; a scheduled or manual run builds every request.
