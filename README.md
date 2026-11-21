@@ -57,7 +57,7 @@ The build gets its own version `<V'>` = `<V>.c<key>` (for example `0.1.11-nightl
 }
 ```
 
-- `state`: `built` when every pick that is neither `merged` nor `unpinned` is `carried`, and at least one is; else `not-built`, and the release holds `carry.json` alone.
+- `state`: `built` when every pick is `carried`, the only build a machine installs; else `not-built`, and the release holds `carry.json` alone.
 - `recipe`: `ok`, or `broken` when the nightly alone fails to build with these steps.
 - Each pick's `pr`: the upstream PR's number, or for an own pick the string from its line, such as `"nitedani/t3code#12"`.
 - Each pick's `state`: `carried`, `doesnt-apply`, `doesnt-build`, `merged` or `unpinned`.
