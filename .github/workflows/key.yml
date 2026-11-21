@@ -45,7 +45,6 @@ jobs:
       T3CODE_TELEMETRY_CHANNEL: dev
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      artifact-name: build-${{ inputs.key }}-${{ github.run_attempt }}
     steps:
       - name: Check out the nightly and fetch the picks
         run: |
@@ -206,7 +205,8 @@ jobs:
       attestations: write
     env:
       SHARED: ${{ inputs.shared }}
-      BUILD: download/${{ needs.build.outputs.artifact-name }}
+      # download-artifact puts the files of one artifact straight into its path.
+      BUILD: download
       GH_TOKEN: ${{ github.token }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -241,8 +241,7 @@ jobs:
               | {(.[0]): {state: .[1], cause: (.[2] | tonumber? // .)}}) | add) as $s
             | [$picks[] | {pr, sha, res} + $s[.pr | tostring]] as $p
             | {schema: 3, $nightly, $version,
-               state: (if any($p[]; .state == "carried") and all($p[]; .state | IN("carried", "merged", "unpinned"))
-                 then "built" else "not-built" end),
+               state: (if all($p[]; .state == "carried") then "built" else "not-built" end),
                $recipe, picks: $p, $run}' > manifest.json
           sums=''
           if [ "$(jq -r .state manifest.json)" = built ]; then
