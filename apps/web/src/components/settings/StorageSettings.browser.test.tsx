@@ -263,6 +263,7 @@ it("lists Last run results failed, then removed, then kept", async () => {
   };
   await using screen = await render(panel());
 
+  await expect.element(screen.getByText(/2 removed, 1 kept, 1 failed/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /Last run/ }));
   await expect.element(screen.getByText("Deleted after 7 days archived")).toBeInTheDocument();
   const text = screen.container.querySelector("#storage-cleanup-last-run")!.textContent!;
