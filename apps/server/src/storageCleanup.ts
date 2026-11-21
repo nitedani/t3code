@@ -318,6 +318,22 @@ export function storageCleanupPullRequestMerged(
   );
 }
 
+// Deleting a parent takes all its side chats, so a task in any of them keeps it too.
+function deletionTakesScheduledTask(
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  scheduledThreadIds: ReadonlySet<string>,
+) {
+  const parentsOfScheduledSideChats = new Set(
+    threads.flatMap((thread) =>
+      thread.lineage.sideChat === true && scheduledThreadIds.has(thread.id)
+        ? [thread.lineage.parentThreadId]
+        : [],
+    ),
+  );
+  return (threadId: ThreadId) =>
+    scheduledThreadIds.has(threadId) || parentsOfScheduledSideChats.has(threadId);
+}
+
 /**
  * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list.
  * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
@@ -354,16 +370,16 @@ function planThreadCleanup({
       thread.pinnedAt == null &&
       !isSnoozed(thread, now),
   );
-  // Deleting a parent takes all its side chats, and archiving it takes the unarchived ones.
-  const scheduledSideChats = threads.filter(
-    (thread) => thread.lineage.sideChat === true && scheduledThreadIds.has(thread.id),
-  );
-  const heldFromDeletion = new Set(
-    scheduledSideChats.map((sideChat) => sideChat.lineage.parentThreadId),
-  );
+  const takesScheduledTask = deletionTakesScheduledTask(threads, scheduledThreadIds);
+  // Archiving a parent takes its unarchived side chats.
   const heldFromArchive = new Set(
-    scheduledSideChats
-      .filter((sideChat) => sideChat.archivedAt === null)
+    threads
+      .filter(
+        (thread) =>
+          thread.lineage.sideChat === true &&
+          thread.archivedAt === null &&
+          scheduledThreadIds.has(thread.id),
+      )
       .map((sideChat) => sideChat.lineage.parentThreadId),
   );
   const deletions =
@@ -372,7 +388,7 @@ function planThreadCleanup({
       : oldestExpired(
           archivedThreadsAfterDays,
           idle.flatMap((thread) =>
-            thread.archivedAt === null || heldFromDeletion.has(thread.id)
+            thread.archivedAt === null || takesScheduledTask(thread.id)
               ? []
               : [
                   {
@@ -1966,17 +1982,18 @@ const make = Effect.gen(function* () {
       settings: serverSettings,
       now,
     });
+    const entryFor = (thread: OrchestrationV2ThreadShell) => ({
+      projectPath:
+        projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
+      threadId: thread.id,
+      threadTitle: thread.title,
+    });
     const apply = Effect.fnUntraced(function* (
       thread: OrchestrationV2ThreadShell,
       command: OrchestrationV2ServerCommand,
       reason: string,
     ) {
-      const entry = {
-        projectPath:
-          projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
-        threadId: thread.id,
-        threadTitle: thread.title,
-      };
+      const entry = entryFor(thread);
       yield* engine.dispatch(command).pipe(
         Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
         // The orchestrator refused the command, usually because the thread changed after this sweep read it.
@@ -2001,6 +2018,15 @@ const make = Effect.gen(function* () {
       return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
     });
     for (const { thread, archivedAt } of plan.deletions) {
+      // A delete can't be undone, so a task enabled since the plan was read still keeps the thread.
+      if (deletionTakesScheduledTask(threads, yield* readScheduledThreadIds())(thread.id)) {
+        entries.push({
+          ...entryFor(thread),
+          outcome: "kept",
+          reason: "thread has a scheduled task",
+        });
+        continue;
+      }
       yield* apply(
         thread,
         {

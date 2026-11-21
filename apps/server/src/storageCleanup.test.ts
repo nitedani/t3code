@@ -386,6 +386,7 @@ const cleanupFixture = (
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const dispatched: OrchestrationV2ServerCommand[] = [];
     let changedThreadIds: ThreadId[] = [];
+    let onDispatch = (_command: OrchestrationV2ServerCommand) => {};
     const requestedPullRequests: number[] = [];
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
@@ -489,6 +490,7 @@ const cleanupFixture = (
         dispatch: (command: OrchestrationV2ServerCommand) =>
           Effect.suspend(() => {
             dispatched.push(command);
+            onDispatch(command);
             return "threadId" in command && changedThreadIds.includes(command.threadId)
               ? Effect.fail(
                   new Orchestrator.OrchestratorDispatchError({
@@ -617,6 +619,9 @@ const cleanupFixture = (
       requestedPullRequests: () => requestedPullRequests,
       changeBeforeDispatch: (threadIds: ThreadId[]) => {
         changedThreadIds = threadIds;
+      },
+      setOnDispatch: (hook: (command: OrchestrationV2ServerCommand) => void) => {
+        onDispatch = hook;
       },
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
@@ -4366,6 +4371,40 @@ describe("settled and archived thread cleanup", () => {
         yield* fixture.service.runNow;
         expect(fixture.dispatched().slice(2)).toMatchObject([
           { type: "thread.archive", threadId: "settled-open-pull-request" },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("keeps an archived thread whose task is enabled while the sweep deletes others", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          archivedThreadsAfterDays: 7,
+        });
+        fixture.setThreads([
+          settled("review-first", { archivedAt: at(-9 * DAY_MS) }),
+          settled("review-second", { archivedAt: at(-8 * DAY_MS) }),
+          settled("review-third", { archivedAt: at(-8 * DAY_MS) }),
+          settled("review-third-side-chat", {
+            lineage: sideChatOf("review-third"),
+            archivedAt: at(-8 * DAY_MS),
+          }),
+        ]);
+        fixture.setOnDispatch((command) => {
+          if ("threadId" in command && command.threadId === "review-first")
+            fixture.setScheduledThreadIds(["review-second", "review-third-side-chat"]);
+        });
+        const report = yield* firstReport(fixture);
+        expect(
+          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
+        ).toEqual(["review-first"]);
+        expect(report.threads).toMatchObject([
+          { threadId: "review-first", outcome: "removed" },
+          { threadId: "review-second", outcome: "kept", reason: "thread has a scheduled task" },
+          { threadId: "review-third", outcome: "kept", reason: "thread has a scheduled task" },
         ]);
       }),
     ),
