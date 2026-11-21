@@ -229,6 +229,8 @@ jobs:
           set -euo pipefail
           eval "$SHARED"
           archive=t3-$VC-linux-x64.tar.gz recipe=$(cat "$BUILD/recipe" 2>/dev/null || echo ok)
+          # The build ran pick code, so its marker is never echoed or signed unless it is one of the two values.
+          case $recipe in ok | broken) ;; *) echo "::error::the build's recipe marker is neither ok nor broken"; exit 1 ;; esac
           gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -s add > releases.json
           if built releases.json "$KEY" "$VC"; then echo "c/$KEY/*/v$VC: another run published it, kept"; exit 0; fi
           # Each run attempt names its own release, since an immutable release's tag name can't be used again.
@@ -250,7 +252,6 @@ jobs:
           fi
           # The signed carry.json names its release and its SHA256SUMS, so files of two attempts can't be mixed.
           jq --arg tag "$tag" --arg sums "$sums" '. + {$tag} + (if $sums == "" then {} else {sha256sums: $sums} end)' manifest.json > release/carry.json
-          cat release/carry.json
           gh release create "$tag" --draft --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "$(jq -r '[.picks[] | "#\(.pr)@\(.sha[:9]) \(.state)"] | join(", ")' release/carry.json) on $VC" \
             --notes-file release/carry.json release/*
