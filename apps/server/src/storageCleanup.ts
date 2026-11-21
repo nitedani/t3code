@@ -2,14 +2,18 @@
 import * as NodeFSP from "node:fs/promises";
 import {
   CheckpointScopeId,
+  CommandId,
   GitCommandError,
+  isListedThreadLineage,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
+  OrchestrationV2ServerCommand,
   OrchestrationV2ThreadShell,
   ProjectId,
   ServerSettings,
@@ -18,9 +22,10 @@ import type {
   WorktreeCleanupRules,
   StorageCleanupReport,
   StorageCleanupReportEntry,
+  StorageCleanupThreadEntry,
   ThreadId,
 } from "@t3tools/contracts";
-import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
+import { resolveProjectSettings, resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
@@ -45,12 +50,14 @@ import * as ServerConfig from "./config.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
+import { visibleThreadPullRequests } from "./sourceControl/threadPullRequests.ts";
 import { scratchFolderRoot } from "./project/ManagedProjectFolders.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointService.ts";
-import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
+import { isSnoozed, threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
 import { MAX_OVERDUE_ARM_MS } from "./orchestration-v2/UsageLimitRecoveryWorker.ts";
 import * as WorktreeBranchSync from "./orchestration-v2/WorktreeBranchSync.ts";
 import { forkParked } from "./serverActivation.ts";
@@ -106,6 +113,9 @@ const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
+// At most this many threads per rule per sweep. Each deletion requests another sweep,
+// so a deletion backlog drains faster than the hourly tick.
+const THREADS_PER_SWEEP = 100;
 const isGitCommandError = Schema.is(GitCommandError);
 const errorCode = (error: PlatformError) =>
   error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
@@ -308,6 +318,126 @@ export function storageCleanupPullRequestMerged(
   );
 }
 
+// Deleting a parent takes all its side chats, so a task in any of them keeps it too.
+function deletionTakesScheduledTask(
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  scheduledThreadIds: ReadonlySet<string>,
+) {
+  const parentsOfScheduledSideChats = new Set(
+    threads.flatMap((thread) =>
+      thread.lineage.sideChat === true && scheduledThreadIds.has(thread.id)
+        ? [thread.lineage.parentThreadId]
+        : [],
+    ),
+  );
+  return (threadId: ThreadId) =>
+    scheduledThreadIds.has(threadId) || parentsOfScheduledSideChats.has(threadId);
+}
+
+/**
+ * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list.
+ * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
+ * unarchiving counts as a change.
+ */
+function planThreadCleanup({
+  threads,
+  scheduledThreadIds,
+  settings,
+  now,
+}: {
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
+  readonly scheduledThreadIds: ReadonlySet<string>;
+  readonly settings: ServerSettings;
+  readonly now: number;
+}) {
+  const { settledThreadsAfterDays, archivedThreadsAfterDays } = settings.storageCleanup;
+  const oldestExpired = <Candidate extends { readonly sinceMs: number }>(
+    days: number,
+    candidates: ReadonlyArray<Candidate>,
+  ) =>
+    candidates
+      .filter((candidate) => candidate.sinceMs <= now - days * DAY_MS)
+      .toSorted((left, right) => left.sinceMs - right.sinceMs)
+      .slice(0, THREADS_PER_SWEEP);
+  const idle = threads.filter(
+    (thread) =>
+      // Side chats follow their parent; subagent threads are not cleaned.
+      isListedThreadLineage(thread.lineage) &&
+      // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
+      !scheduledThreadIds.has(thread.id) &&
+      threadIdle(thread, now, settings) &&
+      // Pinning or snoozing a thread keeps it in view, archived or not.
+      thread.pinnedAt == null &&
+      !isSnoozed(thread, now),
+  );
+  const takesScheduledTask = deletionTakesScheduledTask(threads, scheduledThreadIds);
+  // Archiving a parent takes its unarchived side chats.
+  const heldFromArchive = new Set(
+    threads
+      .filter(
+        (thread) =>
+          thread.lineage.sideChat === true &&
+          thread.archivedAt === null &&
+          scheduledThreadIds.has(thread.id),
+      )
+      .map((sideChat) => sideChat.lineage.parentThreadId),
+  );
+  const deletions =
+    archivedThreadsAfterDays === null
+      ? []
+      : oldestExpired(
+          archivedThreadsAfterDays,
+          idle.flatMap((thread) =>
+            thread.archivedAt === null || takesScheduledTask(thread.id)
+              ? []
+              : [
+                  {
+                    thread,
+                    archivedAt: thread.archivedAt,
+                    sinceMs: DateTime.toEpochMillis(thread.archivedAt),
+                  },
+                ],
+          ),
+        );
+  if (settledThreadsAfterDays === null)
+    return { deletions, archives: [], pullRequestsToRefresh: [] };
+  // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
+  const heldByPullRequests = (thread: OrchestrationV2ThreadShell) =>
+    resolveProjectSettings(settings, thread.projectId).settings.sidebarAutoSettleKeepPullRequests
+      ? visibleThreadPullRequests(thread.pullRequests ?? []).filter(
+          (link) => link.snapshot?.state === "open",
+        )
+      : [];
+  const shelfClockMs = (thread: OrchestrationV2ThreadShell) =>
+    Math.max(
+      DateTime.toEpochMillis(thread.updatedAt),
+      ...[thread.lastSnoozeWakeAt, thread.snoozedUntil]
+        .filter((at) => at != null)
+        .map(DateTime.toEpochMillis)
+        .filter((ms) => ms <= now),
+    );
+  const shelf = idle.flatMap((thread) =>
+    thread.archivedAt === null &&
+    thread.settledOverride === "settled" &&
+    thread.settledAt !== null &&
+    !heldFromArchive.has(thread.id)
+      ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
+      : [],
+  );
+  const sideChatsUnchangedSince = DateTime.makeUnsafe(now - settledThreadsAfterDays * DAY_MS);
+  return {
+    deletions,
+    archives: oldestExpired(
+      settledThreadsAfterDays,
+      shelf.filter((candidate) => candidate.pullRequests.length === 0),
+    ).map(({ thread }) => ({ thread, sideChatsUnchangedSince })),
+    pullRequestsToRefresh: oldestExpired(
+      settledThreadsAfterDays,
+      shelf.filter((candidate) => candidate.pullRequests.length > 0),
+    ).flatMap((candidate) => candidate.pullRequests),
+  };
+}
+
 export class StorageCleanup extends Context.Service<
   StorageCleanup,
   {
@@ -324,6 +454,8 @@ const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const random = yield* SecureRandom.SecureRandom;
+  const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -518,6 +650,14 @@ const make = Effect.gen(function* () {
     const snapshot = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
     const projects = yield* projectStore.listShells();
     return { projects, threads: [...snapshot.threads, ...snapshot.archivedThreads] };
+  });
+
+  const readScheduledThreadIds = Effect.fn("StorageCleanup.readScheduledThreadIds")(function* () {
+    const rows = yield* sql<{ threadId: string }>`
+      SELECT thread_id AS "threadId" FROM scheduled_tasks
+      WHERE enabled = 1 AND thread_id IS NOT NULL
+    `.pipe(NodeSqliteClient.readOnly);
+    return new Set(rows.map((row) => row.threadId));
   });
 
   const containsProjectRoot = Effect.fn("StorageCleanup.containsProjectRoot")(function* (
@@ -1142,11 +1282,8 @@ const make = Effect.gen(function* () {
         if (file !== undefined) return `has local files (${file})`;
       }
       // Each run of a scheduled task works on what its earlier runs left in the folder.
-      const scheduled = yield* sql<{ threadId: string }>`
-        SELECT thread_id AS "threadId" FROM scheduled_tasks
-        WHERE enabled = 1 AND thread_id IS NOT NULL
-      `.pipe(NodeSqliteClient.readOnly);
-      if (scheduled.some((task) => threadIds.includes(task.threadId)))
+      const scheduled = yield* readScheduledThreadIds();
+      if (threadIds.some((threadId) => scheduled.has(threadId)))
         return "thread has a scheduled task";
       return null;
     });
@@ -1831,6 +1968,95 @@ const make = Effect.gen(function* () {
     return removed;
   });
 
+  const cleanThreads = Effect.fn("StorageCleanup.cleanThreads")(function* (
+    serverSettings: ServerSettings,
+    now: number,
+    entries: StorageCleanupThreadEntry[],
+  ) {
+    const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
+    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
+    const { projects, threads } = yield* readThreads();
+    const plan = planThreadCleanup({
+      threads,
+      scheduledThreadIds: yield* readScheduledThreadIds(),
+      settings: serverSettings,
+      now,
+    });
+    const entryFor = (thread: OrchestrationV2ThreadShell) => ({
+      projectPath:
+        projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
+      threadId: thread.id,
+      threadTitle: thread.title,
+    });
+    const apply = Effect.fnUntraced(function* (
+      thread: OrchestrationV2ThreadShell,
+      command: OrchestrationV2ServerCommand,
+      reason: string,
+    ) {
+      const entry = entryFor(thread);
+      yield* engine.dispatch(command).pipe(
+        Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
+        // The orchestrator refused the command, usually because the thread changed after this sweep read it.
+        Effect.catchTags({
+          OrchestratorDispatchError: (error) =>
+            Effect.sync(() =>
+              entries.push({
+                ...entry,
+                outcome: "kept",
+                reason: typeof error.cause === "string" ? error.cause : error.message,
+              }),
+            ),
+        }),
+        Effect.catch((error) =>
+          Effect.sync(() =>
+            entries.push({ ...entry, outcome: "failed", reason: cleanupFailureReason(error) }),
+          ),
+        ),
+      );
+    });
+    const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
+      return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
+    });
+    for (const { thread, archivedAt } of plan.deletions) {
+      // A delete can't be undone, so a task enabled since the plan was read still keeps the thread.
+      if (deletionTakesScheduledTask(threads, yield* readScheduledThreadIds())(thread.id)) {
+        entries.push({
+          ...entryFor(thread),
+          outcome: "kept",
+          reason: "thread has a scheduled task",
+        });
+        continue;
+      }
+      yield* apply(
+        thread,
+        {
+          type: "thread.delete",
+          commandId: yield* commandId(thread),
+          threadId: thread.id,
+          expectedArchivedAt: archivedAt,
+        },
+        `Deleted after ${archivedThreadsAfterDays} days archived`,
+      );
+    }
+    // A settled thread's links are read only on request, so a merge or close would go unseen.
+    yield* Effect.forEach(plan.pullRequestsToRefresh, pullRequestSync.requestSync, {
+      discard: true,
+    });
+    for (const { thread, sideChatsUnchangedSince } of plan.archives) {
+      yield* apply(
+        thread,
+        {
+          type: "thread.archive",
+          commandId: yield* commandId(thread),
+          threadId: thread.id,
+          expectedUpdatedAt: thread.updatedAt,
+          sideChatsUnchangedSince,
+        },
+        `Archived after ${settledThreadsAfterDays} days settled`,
+      );
+    }
+  });
+
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
   const cleanCheckpointRefs = Effect.fn("StorageCleanup.cleanCheckpointRefs")(function* () {
     // Forks display their source history even after its thread is deleted. Keep
@@ -1955,6 +2181,21 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
+    const threadEntries: StorageCleanupThreadEntry[] = [];
+    yield* cleanThreads(serverSettings, now, threadEntries).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          threadEntries.push({
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            projectPath: null,
+            threadId: null,
+            threadTitle: null,
+          });
+          yield* Effect.logWarning("thread cleanup failed", { error });
+        }),
+      ),
+    );
     yield* cleanCheckpointRefs().pipe(
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
     );
@@ -2050,6 +2291,7 @@ const make = Effect.gen(function* () {
       counts,
       bytesFreed,
       omittedCount: Math.max(0, entries.length - REPORT_ENTRY_LIMIT),
+      threads: threadEntries,
     };
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;

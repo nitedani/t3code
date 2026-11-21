@@ -1,7 +1,7 @@
 import { act, fakeTimers, render, type Screen } from "../../../test/render";
 import { RegistryProvider } from "@effect/atom-react";
 import { DEFAULT_SERVER_SETTINGS, type StorageCleanupReport } from "@t3tools/contracts";
-import { type ReactNode } from "react";
+import { createContext, type ReactNode, useContext } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
@@ -39,6 +39,7 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
 vi.mock(import("./SettingsScopeContext"), async (original) => ({
   ...(await original()),
   useSettingsScope: (() => {
+    useContext(ScopeRender);
     const environments = state.targets.map(({ environmentId, settings }) => ({
       environmentId,
       label: environmentId,
@@ -64,7 +65,8 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
 }));
 vi.mock(import("./useScopedSettings"), async (original) => ({
   ...(await original()),
-  useScopedSettings: (() => state.settings) as never,
+  useScopedSettings: ((selector?: (settings: typeof state.settings) => unknown) =>
+    selector ? selector(state.settings) : state.settings) as never,
   useScopedSettingsMixed: () => false,
   useUpdateScopedSettings: () => state.update,
   useClearScopedSettings: () => vi.fn(),
@@ -94,6 +96,7 @@ vi.mock(import("../ui/toast"), async (original) => {
   return { ...actual, toastManager: { ...actual.toastManager, add: vi.fn() } };
 });
 
+import { toastManager } from "../ui/toast";
 import { StorageCleanupSections } from "./StorageSettings";
 
 function setup() {
@@ -108,6 +111,8 @@ function setup() {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      settledThreadsAfterDays: null,
+      archivedThreadsAfterDays: null,
     },
     projectSettingsOverrides: {},
   };
@@ -139,9 +144,13 @@ function setRetentionValues(
   state.settings = state.targets[0]?.settings ?? state.settings;
 }
 
+// Each render is a new scope value, as a settings change is in the app, so scope readers re-render.
+const ScopeRender = createContext({});
 const panel = () => (
   <RegistryProvider>
-    <StorageCleanupSections />
+    <ScopeRender.Provider value={{}}>
+      <StorageCleanupSections />
+    </ScopeRender.Provider>
   </RegistryProvider>
 );
 const deleteButton = (container: HTMLElement) =>
@@ -157,6 +166,115 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
+});
+
+it("shows a failed thread result from Delete now", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, settledThreadsAfterDays: 30 },
+  };
+  state.targets = [{ environmentId: "env-a", settings: state.settings }];
+  const report: StorageCleanupReport = {
+    trigger: "manual",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    finishedAt: "2026-11-20T12:00:01.000Z",
+    entries: [],
+    counts: { removed: 0, kept: 0, failed: 0 },
+    omittedCount: 0,
+    bytesFreed: 0,
+    threads: [
+      {
+        outcome: "failed",
+        reason: "database is locked",
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+      },
+    ],
+  };
+  state.run.mockResolvedValue({ _tag: "Success", value: report });
+  vi.mocked(toastManager.add).mockClear();
+  await using screen = await render(panel());
+
+  await act(async () => deleteButton(screen.container).click());
+  expect(toastManager.add).toHaveBeenCalledWith(
+    expect.objectContaining({
+      title: "Cleanup failed on env-a",
+      description: "database is locked",
+    }),
+  );
+});
+
+it("lists Last run results failed, then removed, then kept", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, settledThreadsAfterDays: 30 },
+  };
+  state.targets = [{ environmentId: "env-a", settings: state.settings }];
+  state.report = {
+    trigger: "automatic",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    finishedAt: "2026-11-20T12:00:01.000Z",
+    entries: [
+      {
+        kind: "logs",
+        outcome: "failed",
+        reason: "Logs folder could not be read",
+        path: null,
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+        bytes: null,
+        files: null,
+      },
+      {
+        kind: "logs",
+        outcome: "removed",
+        reason: "Rotated logs past 14 days",
+        path: null,
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+        bytes: 2048,
+        files: 2,
+      },
+    ],
+    counts: { removed: 1, kept: 0, failed: 1 },
+    omittedCount: 0,
+    bytesFreed: 0,
+    threads: [
+      {
+        outcome: "removed",
+        reason: "Deleted after 7 days archived",
+        projectPath: null,
+        threadId: null,
+        threadTitle: "Old thread",
+      },
+      {
+        outcome: "kept",
+        reason: "Thread changed before it was archived.",
+        projectPath: null,
+        threadId: null,
+        threadTitle: "Busy thread",
+      },
+    ],
+  };
+  await using screen = await render(panel());
+
+  await expect.element(screen.getByText(/2 removed, 1 kept, 1 failed/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /Last run/ }));
+  await expect.element(screen.getByText("Deleted after 7 days archived")).toBeInTheDocument();
+  const text = screen.container.querySelector("#storage-cleanup-last-run")!.textContent!;
+  const order = [
+    "Logs folder could not be read",
+    "Deleted after 7 days archived",
+    "Rotated logs past 14 days",
+    "Thread changed before it was archived.",
+  ].map((reason) => text.indexOf(reason));
+  expect(order).toEqual(order.toSorted((left, right) => left - right));
+  expect(Math.min(...order)).toBeGreaterThan(-1);
 });
 
 const rule = "Delete old browser artifacts";

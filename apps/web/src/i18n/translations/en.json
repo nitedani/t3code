@@ -12469,5 +12469,11 @@
   "b7df38b7d8792d78": "Open guide",
   "9e91e9a77b664e4e": "Could not start a review guide",
   "d8aaf932f90429c4": "Move this command to the front of the queue ({shortcut})",
-  "425ab15036aec8a4": "Move this command to the front of the queue"
+  "425ab15036aec8a4": "Move this command to the front of the queue",
+  "6572f44f2b8f030d": "Settled and archived threads",
+  "bdb22e8ed3dcdcf1": "Archive settled threads",
+  "40eb4974d8282a55": "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
+  "7a240a7dc1cf6ac3": "Delete archived threads",
+  "a16843c5733a43bc": "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
+  "b32e50d8961787d5": "automatic archive settled threads delete archived threads old cleanup retention days"
 }

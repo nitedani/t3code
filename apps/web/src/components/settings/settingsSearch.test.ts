@@ -227,6 +227,8 @@ describe("searchSettings", () => {
       ["Delete settled worktrees", "storage-worktrees"],
       ["Delete old browser artifacts", "storage-artifacts"],
       ["Delete old rotated logs", "storage-artifacts"],
+      ["Archive settled threads", "storage-threads"],
+      ["Delete archived threads", "storage-threads"],
       ["Custom search URL", "browser-search-engine"],
       ["Native sessions", "providers"],
       ["CODEX_HOME path", "providers"],

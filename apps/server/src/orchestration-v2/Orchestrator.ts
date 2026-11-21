@@ -15731,6 +15731,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
           );
         });
+        if (command.expectedArchivedAt !== undefined) {
+          const archivedAt = (yield* findThread(command.threadId))?.archivedAt ?? null;
+          if (
+            archivedAt === null ||
+            DateTime.toEpochMillis(archivedAt) !==
+              DateTime.toEpochMillis(command.expectedArchivedAt)
+          ) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: `Thread ${command.threadId} was unarchived or archived again.`,
+            });
+          }
+          for (const threadId of sideChatIds) {
+            const sideChat = yield* findThread(threadId);
+            if (sideChat === null) continue;
+            const records = yield* projectionStore
+              .getThreadRecords(threadId, ["runs", "runtimeRequests"])
+              .pipe(mapDispatchError(command));
+            if (sideChat.archivedAt === null || threadHasUnfinishedWork(records)) {
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: `Thread ${command.threadId} has a side chat in use.`,
+              });
+            }
+          }
+        }
         // Checked under the thread lock: a message sent since the client looked keeps the thread.
         if (command.onlyIfUnused === true) {
           const usage = yield* projectionStore
@@ -15762,7 +15790,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       case "thread.archive":
       case "thread.unarchive": {
-        const parentArchivedAt = (yield* findThread(command.threadId))?.archivedAt ?? null;
+        const parent = yield* findThread(command.threadId);
+        if (command.type === "thread.archive") {
+          if (
+            command.expectedUpdatedAt !== undefined &&
+            parent !== null &&
+            DateTime.toEpochMillis(parent.updatedAt) !==
+              DateTime.toEpochMillis(command.expectedUpdatedAt)
+          ) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: `Thread ${command.threadId} changed before it was archived.`,
+            });
+          }
+          if (command.sideChatsUnchangedSince !== undefined) {
+            const cutoff = DateTime.toEpochMillis(command.sideChatsUnchangedSince);
+            for (const threadId of sideChatIds) {
+              const sideChat = yield* findThread(threadId);
+              if (sideChat === null || sideChat.archivedAt !== null) continue;
+              const records = yield* projectionStore
+                .getThreadRecords(threadId, ["runs", "runtimeRequests"])
+                .pipe(mapDispatchError(command));
+              if (
+                DateTime.toEpochMillis(sideChat.updatedAt) > cutoff ||
+                threadHasUnfinishedWork(records)
+              ) {
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: `Thread ${command.threadId} has a side chat in use.`,
+                });
+              }
+            }
+          }
+        }
+        const parentArchivedAt = parent?.archivedAt ?? null;
         yield* dispatchThreadMutation(command, events, effects);
         // Unarchive restores the side chats this parent's archive took, not ones archived before it.
         for (const threadId of sideChatIds) {

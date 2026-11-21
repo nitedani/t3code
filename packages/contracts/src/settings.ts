@@ -1330,6 +1330,14 @@ export const StorageCleanupReportEntry = Schema.Struct({
   files: Schema.NullOr(Schema.Number).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 });
 export type StorageCleanupReportEntry = typeof StorageCleanupReportEntry.Type;
+export const StorageCleanupThreadEntry = Schema.Struct({
+  outcome: StorageCleanupReportEntry.fields.outcome,
+  reason: Schema.String,
+  projectPath: Schema.NullOr(Schema.String),
+  threadId: Schema.NullOr(ThreadId),
+  threadTitle: Schema.NullOr(Schema.String),
+});
+export type StorageCleanupThreadEntry = typeof StorageCleanupThreadEntry.Type;
 export const StorageCleanupReport = Schema.Struct({
   trigger: Schema.Literals(["automatic", "manual"]),
   startedAt: Schema.String,
@@ -1338,6 +1346,8 @@ export const StorageCleanupReport = Schema.Struct({
   counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
   omittedCount: Schema.Number,
   bytesFreed: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** Outside `entries` and `counts`, so clients that predate thread cleanup still decode the report. */
+  threads: Schema.optionalKey(Schema.Array(StorageCleanupThreadEntry)),
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 
@@ -1356,6 +1366,14 @@ export const StorageCleanupSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Counted from the thread's last update or snooze ending; unarchiving counts as an update. */
+  settledThreadsAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Applies to archived threads, including ones archived by hand. */
+  archivedThreadsAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
@@ -1860,6 +1878,8 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      settledThreadsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      archivedThreadsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),

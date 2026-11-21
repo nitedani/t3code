@@ -286,6 +286,38 @@ function lastRunSummary(
   return entries.map((entry) => `${entry.label}: ${entry.counts}`).join(" · ");
 }
 
+/** Thread outcomes sit outside the report's counts, which clients that predate them also read. */
+function cleanupCounts(report: StorageCleanupReport) {
+  const counts = { ...report.counts };
+  for (const entry of report.threads ?? []) counts[entry.outcome]++;
+  return counts;
+}
+
+/**
+ * Thread results in the entry shape, then the report's own entries, in the server's report order:
+ * failed, removed, kept worktrees no thread owns, then the rest, stable within each.
+ */
+function cleanupEntries(report: StorageCleanupReport) {
+  const priority = (entry: { outcome: string; kind: string; threadId: string | null }) =>
+    entry.outcome === "failed"
+      ? 0
+      : entry.outcome === "removed"
+        ? 1
+        : entry.kind === "worktree" && entry.threadId === null
+          ? 2
+          : 3;
+  return [
+    ...(report.threads ?? []).map((entry) => ({
+      ...entry,
+      kind: "thread" as const,
+      path: null,
+      bytes: null,
+      files: null,
+    })),
+    ...report.entries,
+  ].toSorted((left, right) => priority(left) - priority(right));
+}
+
 function CleanupResults({
   report,
   environmentLabel,
@@ -294,17 +326,20 @@ function CleanupResults({
   environmentLabel: string;
 }) {
   const gt = useGT();
+  const entries = cleanupEntries(report);
   return (
     <>
-      {report.entries.map((entry, index) => {
+      {entries.map((entry, index) => {
         const name =
           entry.kind === "worktree"
             ? ((entry.threadId === null
                 ? entry.path
                 : entry.path?.split(/[\\/]/).findLast(Boolean)) ?? gt("Worktrees"))
-            : entry.kind === "logs"
-              ? gt("Rotated logs")
-              : gt("Browser artifacts");
+            : entry.kind === "thread"
+              ? gt("Threads")
+              : entry.kind === "logs"
+                ? gt("Rotated logs")
+                : gt("Browser artifacts");
         return (
           <SettingsRow
             key={`${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
@@ -379,7 +414,7 @@ function CleanupResults({
           )}
         </p>
       )}
-      {report.entries.length === 0 && report.omittedCount === 0 && (
+      {entries.length === 0 && report.omittedCount === 0 && (
         <p className="px-3 py-2.5 text-xs text-muted-foreground sm:px-4">
           <T>
             <Var>{environmentLabel}</Var>: Nothing needed cleanup.
@@ -436,6 +471,8 @@ function CleanupSection() {
     return (
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
+      settings.storageCleanup.settledThreadsAfterDays !== null ||
+      settings.storageCleanup.archivedThreadsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
       Object.values(settings.projectSettingsOverrides).some(
         (override) =>
@@ -447,34 +484,36 @@ function CleanupSection() {
   const summaries = supported.map((environment) => {
     const query = state.find((entry) => entry.environmentId === environment.environmentId);
     const report = query?.report ?? null;
+    const counts = report === null ? null : cleanupCounts(report);
     return {
       environment,
       report,
       label: settingsScopeEnvironmentLabel(environment, connectedEnvironments),
-      counts: report
-        ? report.counts.failed > 0
-          ? gt("{removed} removed, {kept} kept, {failed} failed", report.counts)
-          : gt("{removed} removed, {kept} kept", report.counts)
+      counts: counts
+        ? counts.failed > 0
+          ? gt("{removed} removed, {kept} kept, {failed} failed", counts)
+          : gt("{removed} removed, {kept} kept", counts)
         : "",
-      description: report
-        ? report.counts.failed > 0
-          ? gt(
-              "{count, plural, one {Last run {when}. {bytes} recovered. {count} item couldn't be removed.} other {Last run {when}. {bytes} recovered. {count} items couldn't be removed.}}",
-              {
-                count: report.counts.failed,
+      description:
+        report !== null && counts !== null
+          ? counts.failed > 0
+            ? gt(
+                "{count, plural, one {Last run {when}. {bytes} recovered. {count} item couldn't be removed.} other {Last run {when}. {bytes} recovered. {count} items couldn't be removed.}}",
+                {
+                  count: counts.failed,
+                  when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
+                  bytes: formatBytes(report.bytesFreed),
+                },
+              )
+            : gt("Last run {when}. {bytes} recovered.", {
                 when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
                 bytes: formatBytes(report.bytesFreed),
-              },
-            )
-          : gt("Last run {when}. {bytes} recovered.", {
-              when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
-              bytes: formatBytes(report.bytesFreed),
-            })
-        : query?.failed
-          ? gt("Could not load the last run.")
-          : query?.loading
-            ? gt("Loading last run…")
-            : gt("Cleanup hasn't run yet."),
+              })
+          : query?.failed
+            ? gt("Could not load the last run.")
+            : query?.loading
+              ? gt("Loading last run…")
+              : gt("Cleanup hasn't run yet."),
     };
   });
   const deleteNow = async () => {
@@ -488,7 +527,9 @@ function CleanupSection() {
         .map(async (environment) => {
           const result = await run({ environmentId: environment.environmentId, input: {} });
           if (result._tag === "Success") {
-            const failures = result.value.entries.filter((entry) => entry.outcome === "failed");
+            const failures = cleanupEntries(result.value).filter(
+              (entry) => entry.outcome === "failed",
+            );
             if (failures.length > 0)
               toastManager.add({
                 type: "error",
@@ -871,39 +912,59 @@ export function WorktreeCleanupSection() {
   );
 }
 
-/** Retention for logs and captures, and the manual cleanup run, which covers worktrees too. */
+function StorageRetentionRow({
+  setting,
+  title,
+  description,
+}: {
+  setting:
+    | "browserArtifactsAfterDays"
+    | "logsAfterDays"
+    | "settledThreadsAfterDays"
+    | "archivedThreadsAfterDays";
+  title: string;
+  description: string;
+}) {
+  const gt = useGT();
+  const { targets } = useSettingsScope();
+  const value = useScopedSettings((settings) => settings.storageCleanup[setting]);
+  const updateSettings = useUpdateScopedSettings();
+  const targetIdsKey = environmentIdsKey(targets.map((target) => target.environmentId).sort());
+  const mixed =
+    targets.length > 1 &&
+    targets.some((target) => target.settings.storageCleanup[setting] !== value);
+  const settledStatus = useDebouncedValue(`${targetIdsKey}:${mixed}`, 300);
+  return (
+    <AnimatedHeight>
+      <SettingsRow
+        title={title}
+        status={
+          targets.length > 1 && settledStatus === `${targetIdsKey}:true`
+            ? gt("Mixed across selected machines")
+            : undefined
+        }
+        managedPaths={[`storageCleanup.${setting}`]}
+        description={description}
+        serverScoped
+        control={
+          <RetentionControl
+            label={title}
+            value={value}
+            onChange={(days, onFailed) =>
+              updateSettings({ storageCleanup: { [setting]: days } }, { onFailed })
+            }
+          />
+        }
+      />
+    </AnimatedHeight>
+  );
+}
+
+/** Retention for logs, captures and threads, and the manual cleanup run, which covers worktrees too. */
 export function StorageCleanupSections() {
   const gt = useGT();
-  const { scope, connectedEnvironments, targets } = useSettingsScope();
-  const scopedSettings = useScopedSettings();
-  const updateSettings = useUpdateScopedSettings();
-  const settings = scopedSettings.storageCleanup;
-  const targetIdsKey = environmentIdsKey(targets.map((target) => target.environmentId).sort());
-  const artifactsMixed =
-    targets.length > 1 &&
-    targets.some(
-      (target) =>
-        target.settings.storageCleanup.browserArtifactsAfterDays !==
-        settings.browserArtifactsAfterDays,
-    );
-  const logsMixed =
-    targets.length > 1 &&
-    targets.some(
-      (target) => target.settings.storageCleanup.logsAfterDays !== settings.logsAfterDays,
-    );
-  const settledArtifactsStatus = useDebouncedValue(`${targetIdsKey}:${artifactsMixed}`, 300);
-  const settledLogsStatus = useDebouncedValue(`${targetIdsKey}:${logsMixed}`, 300);
-  const artifactsStatus =
-    targets.length > 1 && settledArtifactsStatus === `${targetIdsKey}:true`
-      ? gt("Mixed across selected machines")
-      : undefined;
-  const logsStatus =
-    targets.length > 1 && settledLogsStatus === `${targetIdsKey}:true`
-      ? gt("Mixed across selected machines")
-      : undefined;
+  const { scope, connectedEnvironments } = useSettingsScope();
   if (scope.kind === "project" || scope.kind === "checkout") return null;
-  const update = (patch: Partial<StorageCleanupSettings>, options: SaveOptions) =>
-    updateSettings({ storageCleanup: patch }, options);
   const databaseStorageNotice = (
     <DatabaseStorageNotice
       environments={connectedEnvironments.filter(
@@ -927,44 +988,36 @@ export function StorageCleanupSections() {
     <>
       {databaseStorageNotice}
       <SettingsSection id="storage-artifacts" title={gt("Artifacts and logs")}>
-        <AnimatedHeight>
-          <SettingsRow
-            title={gt("Delete old browser artifacts")}
-            status={artifactsStatus}
-            managedPaths={["storageCleanup.browserArtifactsAfterDays"]}
-            description={gt(
-              "Delete saved browser captures after this many days. Older capture links will no longer open.",
-            )}
-            serverScoped
-            control={
-              <RetentionControl
-                label={gt("Delete old browser artifacts")}
-                value={settings.browserArtifactsAfterDays}
-                onChange={(browserArtifactsAfterDays, onFailed) =>
-                  update({ browserArtifactsAfterDays }, { onFailed })
-                }
-              />
-            }
-          />
-        </AnimatedHeight>
-        <AnimatedHeight>
-          <SettingsRow
-            title={gt("Delete old rotated logs")}
-            status={logsStatus}
-            managedPaths={["storageCleanup.logsAfterDays"]}
-            description={gt(
-              "Delete inactive rotated log files after this many days. Current logs are kept.",
-            )}
-            serverScoped
-            control={
-              <RetentionControl
-                label={gt("Delete old rotated logs")}
-                value={settings.logsAfterDays}
-                onChange={(logsAfterDays, onFailed) => update({ logsAfterDays }, { onFailed })}
-              />
-            }
-          />
-        </AnimatedHeight>
+        <StorageRetentionRow
+          setting="browserArtifactsAfterDays"
+          title={gt("Delete old browser artifacts")}
+          description={gt(
+            "Delete saved browser captures after this many days. Older capture links will no longer open.",
+          )}
+        />
+        <StorageRetentionRow
+          setting="logsAfterDays"
+          title={gt("Delete old rotated logs")}
+          description={gt(
+            "Delete inactive rotated log files after this many days. Current logs are kept.",
+          )}
+        />
+      </SettingsSection>
+      <SettingsSection id="storage-threads" title={gt("Settled and archived threads")}>
+        <StorageRetentionRow
+          setting="settledThreadsAfterDays"
+          title={gt("Archive settled threads")}
+          description={gt(
+            "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
+          )}
+        />
+        <StorageRetentionRow
+          setting="archivedThreadsAfterDays"
+          title={gt("Delete archived threads")}
+          description={gt(
+            "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
+          )}
+        />
       </SettingsSection>
       <CleanupSection />
     </>
