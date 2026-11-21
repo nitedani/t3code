@@ -134,17 +134,25 @@ jobs:
           : > wanted
           # Every valid request's key, whose releases prune keeps, also when its PRs can't be read tonight.
           : > requested
-          gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" |
-            jq -c --argjson who "$REQUESTERS" '.[] | select(.pull_request == null and (.user.login | IN($who[]))) | {number, author: .user.login, body: (.body // "")}' > issues.jsonl
+          # Each open issue's author, last editor and body from one read, so the body built is the one whose editor was checked.
+          # shellcheck disable=SC2016 # the $ names are GraphQL variables
+          gh api graphql --paginate -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='
+            query($owner: String!, $name: String!, $endCursor: String) {
+              repository(owner: $owner, name: $name) {
+                issues(states: OPEN, first: 100, after: $endCursor) {
+                  nodes { number author { login } editor { login } body }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }' --jq '.data.repository.issues.nodes[]' |
+            jq -c --argjson who "$REQUESTERS" 'select(.author.login // "" | IN($who[]))
+              | {number, author: .author.login, editor: .editor.login, body: (.body // "")}' > issues.jsonl
           while IFS= read -r issue; do
-            n=$(jq -r .number <<<"$issue") author=$(jq -r .author <<<"$issue")
+            n=$(jq -r .number <<<"$issue") author=$(jq -r .author <<<"$issue") editor=$(jq -r '.editor // ""' <<<"$issue")
             # Anyone with write here can edit any issue, so a body counts only as its author last saved it.
-            # shellcheck disable=SC2016 # the $ names are GraphQL variables
-            editor=$(gh api graphql -F n="$n" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='
-              query($owner: String!, $name: String!, $n: Int!) {
-                repository(owner: $owner, name: $name) { issue(number: $n) { author { login } editor { login } } }
-              }' --jq '.data.repository.issue | select(.editor != null and .editor.login != .author.login) | .editor.login')
-            if [ -n "$editor" ]; then echo "::error::#$n: the request was last edited by $editor, not its author $author; not built"; continue; fi
+            if [ -n "$editor" ] && [ "$editor" != "$author" ]; then
+              echo "::error::#$n: the request was last edited by $editor, not its author $author; not built"; continue
+            fi
             body=$(jq -r .body <<<"$issue" | tr -d '\r')
             picks=$(grep -E "$PICK" <<<"$body" | LC_ALL=C sort -k2,2n) || true
             if grep -vqE "$PICK|^\$" <<<"$body"; then echo "::error::#$n: a line is not 'pick <pr> <sha40> [<res40>]' or 'pick $GH_REPO#<pr> <sha40> [<res40>]'"; continue
