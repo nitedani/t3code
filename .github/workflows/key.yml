@@ -15,8 +15,8 @@ on:
       version:
         type: string
         required: true
-      # carry.yml's RESOLVES.
-      resolves:
+      # carry.yml's SHARED.
+      shared:
         type: string
         required: true
 
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 240
     permissions: {}
     env:
-      RESOLVES: ${{ inputs.resolves }}
+      SHARED: ${{ inputs.shared }}
       INSTALL_ARGS: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
       T3CODE_TELEMETRY_CHANNEL: dev
     outputs:
@@ -86,7 +86,7 @@ jobs:
           for pr in $(jq -r '.[] | select(.merged) | .pr' <<<"$PICKS"); do state "$pr" merged; done
           for pr in $(jq -r '.[] | select(.pinned or .merged | not) | .pr' <<<"$PICKS"); do state "$pr" unpinned; done
 
-          eval "$RESOLVES"
+          eval "$SHARED"
           # The nightly with the picks merged in PR order, each by its resolution if it has one; one that conflicts is left
           # out. applied: the picks merged; resolved: the shas of those merged by a resolution.
           apply() {
@@ -203,6 +203,7 @@ jobs:
       id-token: write
       attestations: write
     env:
+      SHARED: ${{ inputs.shared }}
       GH_TOKEN: ${{ github.token }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -218,11 +219,10 @@ jobs:
         name: Write carry.json and SHA256SUMS into a draft release
         run: |
           set -euo pipefail
+          eval "$SHARED"
           archive=t3-$VC-linux-x64.tar.gz recipe=$(cat build/recipe 2>/dev/null || echo ok)
-          if gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -se --arg key "$KEY" --arg vc "$VC" 'any(add[];
-            (.draft | not) and (.tag_name | startswith("c/\($key)/") and endswith("/v\($vc)")) and any(.assets[]; .name == "SHA256SUMS"))' >/dev/null; then
-            echo "c/$KEY/*/v$VC: another run published it, kept"; exit 0
-          fi
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -s add > releases.json
+          if built releases.json "$KEY" "$VC"; then echo "c/$KEY/*/v$VC: another run published it, kept"; exit 0; fi
           # Each run attempt names its own release, since an immutable release's tag name can't be used again.
           tag=c/$KEY/r$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT/v$VC
           mkdir release
@@ -230,7 +230,9 @@ jobs:
             ($states | split("\n") | map(select(. != "") | split(" ")
               | {(.[0]): {state: .[1], cause: (.[2] | tonumber? // .)}}) | add) as $s
             | [$picks[] | {pr, sha, res} + $s[.pr | tostring]] as $p
-            | {schema: 3, $nightly, $version, state: (if any($p[]; .state == "carried") then "built" else "not-built" end),
+            | {schema: 3, $nightly, $version,
+               state: (if any($p[]; .state == "carried") and all($p[]; .state | IN("carried", "merged", "unpinned"))
+                 then "built" else "not-built" end),
                $recipe, picks: $p, $run}' > manifest.json
           sums=''
           if [ "$(jq -r .state manifest.json)" = built ]; then

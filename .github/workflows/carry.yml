@@ -29,10 +29,26 @@ env:
   REQUESTERS: '["nitedani","nitedani-agent"]'
   # An upstream PR, or an own PR: this repo's <owner>/t3code#<n>, open and based on main.
   PICK: "^pick ([1-9][0-9]{0,6}|[A-Za-z0-9-]+/t3code#[1-9][0-9]{0,6}) [0-9a-f]{40}( [0-9a-f]{40})?$"
-  # resolves <sha> <res> <tip>: res holds the pick, and its own first-parent line (what neither tip nor the pick has) starts
-  # with a merge and merges only the pick or code already in tip, so a resolution made over a pick that is gone can't bring
-  # it back. The plan's check and the build's apply (key.yml, which gets it from the plan) both run it.
-  RESOLVES: |
+  # The plan and key.yml (which gets these from the plan) both run them.
+  SHARED: |
+    # built <releases.json> <key> <V'>: a published release of the key at V' has a carry.json that key.yml attested on
+    # carry, naming that release's own tag, with state built. Then the plan builds the key no more, and publish adds none.
+    built() {
+      local tag dir
+      dir=$(mktemp -d)
+      for tag in $(jq -r --arg key "$2" --arg vc "$3" '.[] | select((.draft | not)
+        and (.tag_name | startswith("c/\($key)/") and endswith("/v\($vc)"))) | .tag_name' "$1"); do
+        rm -f "$dir/carry.json"
+        gh release download "$tag" --pattern carry.json --dir "$dir" &&
+          gh attestation verify "$dir/carry.json" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/key.yml" \
+            --source-ref refs/heads/carry --deny-self-hosted-runners >/dev/null &&
+          jq -e --arg tag "$tag" '.tag == $tag and .state == "built"' "$dir/carry.json" >/dev/null && return 0
+      done
+      return 1
+    }
+    # resolves <sha> <res> <tip>: res holds the pick, and its own first-parent line (what neither tip nor the pick has)
+    # starts with a merge and merges only the pick or code already in tip, so a resolution made over a pick that is gone
+    # can't bring it back. The plan's check and the build's apply run it.
     resolves() {
       local sha=$1 res=$2 tip=$3 others parent lowest=''
       git merge-base --is-ancestor "$sha" "$res" || return 1
@@ -50,6 +66,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      attestations: read
       contents: read
       issues: read
     env:
@@ -60,13 +77,13 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       keys: ${{ steps.plan.outputs.keys }}
       work: ${{ steps.plan.outputs.work }}
-      resolves: ${{ steps.plan.outputs.resolves }}
+      shared: ${{ steps.plan.outputs.shared }}
     steps:
       - id: plan
         name: Read the requests, what upstream says of each pick, and the newest nightly
         run: |
           set -euo pipefail
-          eval "$RESOLVES"
+          eval "$SHARED"
           version=$(gh api "repos/$UPSTREAM/releases?per_page=50" --jq '[.[] | select(.draft | not)
             | select(.tag_name | test("^v[0-9.]+-nightly\\.[0-9]{8}\\.[0-9]+$"))] | sort_by(.published_at) | last | .tag_name // "" | ltrimstr("v")')
           [ -n "$version" ] || { echo "::error::no nightly release on $UPSTREAM"; exit 1; }
@@ -174,12 +191,11 @@ jobs:
           jq -sc 'unique_by(.key)' requests.jsonl > requests.json
           gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -s add > releases.json
           # A key is built only when every pick applies, since a machine installs only a build that carries all its picks: a
-          # pick that doesn't waits for a Resolve press. A key is built for this nightly once a release of it has SHA256SUMS;
-          # each run's release has its own tag, so a not-built key is built again. An issue event's run builds only its request.
+          # pick that doesn't waits for a Resolve press. Each run's release has its own tag, so a key that isn't built is
+          # built again. An issue event's run builds only its request.
           mapfile -t keys < <(sort -u wanted)
           for key in "${keys[@]}"; do
-            if jq -e --arg key "$key" --arg v "$version" 'any(.[]; (.draft | not) and (.tag_name | startswith("c/\($key)/") and endswith("/v\($v).c\($key)"))
-              and any(.assets[]; .name == "SHA256SUMS"))' releases.json >/dev/null; then
+            if built releases.json "$key" "$version.c$key"; then
               echo "c/$key/*/v$version.c$key: built"
             elif ! applies "$key"; then
               echo "::warning::c/$key/*/v$version.c$key: not built, since a pick doesn't apply"
@@ -191,7 +207,7 @@ jobs:
             echo "version=$version"
             echo "keys=$(jq -nRc '[inputs] | unique' requested)"
             echo "work=$(cat work.json)"
-            printf 'resolves<<EOF\n%s\nEOF\n' "$RESOLVES"
+            printf 'shared<<EOF\n%s\nEOF\n' "$SHARED"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -216,7 +232,7 @@ jobs:
       key: ${{ matrix.key }}
       picks: ${{ toJSON(matrix.picks) }}
       version: ${{ needs.plan.outputs.version }}
-      resolves: ${{ needs.plan.outputs.resolves }}
+      shared: ${{ needs.plan.outputs.shared }}
 
   keepalive:
     # GitHub disables a public repo's schedules after 60 days without activity; re-enabling the workflow needs no commit.
