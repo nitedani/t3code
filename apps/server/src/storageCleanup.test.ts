@@ -4292,6 +4292,12 @@ describe("settled and archived thread cleanup", () => {
           settled("active-expired", { settledOverride: null, settledAt: null }),
           settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
+          settled("archived-pinned", { archivedAt: at(-8 * DAY_MS), pinnedAt: at(-9 * DAY_MS) }),
+          settled("archived-snoozed", {
+            archivedAt: at(-8 * DAY_MS),
+            snoozedAt: at(-9 * DAY_MS),
+            snoozedUntil: at(DAY_MS),
+          }),
           settled("settled-scheduled"),
           settled("archived-scheduled", { archivedAt: at(-8 * DAY_MS) }),
           settled("archived-parent", { archivedAt: at(-8 * DAY_MS) }),

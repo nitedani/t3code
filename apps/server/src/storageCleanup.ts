@@ -349,7 +349,10 @@ function planThreadCleanup({
       isListedThreadLineage(thread.lineage) &&
       // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
       !scheduledThreadIds.has(thread.id) &&
-      threadIdle(thread, now, settings),
+      threadIdle(thread, now, settings) &&
+      // Pinning or snoozing a thread keeps it in view, archived or not.
+      thread.pinnedAt == null &&
+      !isSnoozed(thread, now),
   );
   // Deleting a parent takes all its side chats, and archiving it takes the unarchived ones.
   const scheduledSideChats = threads.filter(
@@ -401,8 +404,6 @@ function planThreadCleanup({
     thread.archivedAt === null &&
     thread.settledOverride === "settled" &&
     thread.settledAt !== null &&
-    thread.pinnedAt == null &&
-    !isSnoozed(thread, now) &&
     !heldFromArchive.has(thread.id)
       ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
       : [],
