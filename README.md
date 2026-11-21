@@ -37,9 +37,9 @@ Per pick, in PR order:
 
 Then upstream's release steps for the Linux x64 CLI archive run: install, typecheck, bundle, build and smoke test, with `dev` telemetry as upstream does outside pingdotgg. A pick merged by its resolution also runs `vp test run` on the test files its PR changes. When any step fails, the nightly alone is built, then in PR order each pick over the picks kept so far: a pick is kept when that builds, and is `doesnt-build` when it doesn't. So a resolution made over an earlier pick is built with that pick. A `doesnt-build` pick is then built over the nightly alone, and when that builds, over the first picks of the kept ones, halving the range each time, to find a run of them it fails over: its `cause` is `alone`, or the last pick of that run. When the nightly alone fails, every pick is `doesnt-build` and `recipe` is `broken`. On a night that builds, none of this runs.
 
-The picks' code runs only in key.yml's `build` job, which holds no token and uses no Actions cache; it hands the archive and each pick's state to the `publish` job, which runs no pick code. So one machine's picks can't change another machine's build or sign one.
+The picks' code runs only in key.yml's `build` job, which holds no token that can write to this repo or sign, and uses no Actions cache; it hands the archive and each pick's state to the `publish` job, which runs no pick code. So one machine's picks can't change another machine's build or sign one.
 
-The build gets its own version `<V'>` = `<V>.c<key>` (for example `0.1.11-nightly.20261117.4825.c32b5b524027a2d1b`), which sorts above `<V>` and below the next nightly, so it never shares an install with the official `<V>` or another pick set. The result is the prerelease `c/<key>/r<run>.<attempt>/v<V'>`, tagged on this repo's `carry`, where `<run>.<attempt>` is the run's id and attempt: releases here are immutable and a deleted release's tag name can't be used again, so every run publishes under a name of its own. A key counts as built for `v<V>` once one of its releases has `SHA256SUMS`, so a key that wasn't built is built again by the next run. Its body and its `carry.json` asset are the same JSON, schema 3, which says what the build did, not what upstream says of each PR now:
+The build gets its own version `<V'>` = `<V>.c<key>` (for example `0.1.11-nightly.20261117.4825.c32b5b524027a2d1b`), which sorts above `<V>` and below the next nightly, so it never shares an install with the official `<V>` or another pick set. The result is the prerelease `c/<key>/r<run>.<attempt>/v<V'>`, tagged on this repo's `carry`, where `<run>.<attempt>` is the run's id and attempt: releases here are immutable and a deleted release's tag name can't be used again, so every run publishes under a name of its own. A key counts as built for `v<V>` once one of its published releases has a `carry.json` that key.yml attested on `carry`, naming that release's own tag, with state `built`; a key that wasn't built is built again by the next run. Its body and its `carry.json` asset are the same JSON, schema 3, which says what the build did, not what upstream says of each PR now:
 
 ```json
 {
@@ -51,15 +51,19 @@ The build gets its own version `<V'>` = `<V>.c<key>` (for example `0.1.11-nightl
   "picks": [
     {"pr": 31488, "sha": "<sha40>", "res": null, "state": "carried", "cause": null}
   ],
-  "run": "<the run's URL>"
+  "run": "<the run's URL>",
+  "tag": "c/<key>/r<run>.<attempt>/v<V'>",
+  "sha256sums": "<sha256 of SHA256SUMS>"
 }
 ```
 
-- `state`: `built` when at least one pick is `carried`, else `not-built`.
+- `state`: `built` when every pick that is neither `merged` nor `unpinned` is `carried`, and at least one is; else `not-built`, and the release holds `carry.json` alone.
 - `recipe`: `ok`, or `broken` when the nightly alone fails to build with these steps.
 - Each pick's `pr`: the upstream PR's number, or for an own pick the string from its line, such as `"nitedani/t3code#12"`.
 - Each pick's `state`: `carried`, `doesnt-apply`, `doesnt-build`, `merged` or `unpinned`.
 - `cause`: for a `doesnt-build` pick, `alone` or the `pr` of the earlier pick it fails with; else `null`, also when `recipe` is `broken`.
+- `tag`: the tag of the release it is published in.
+- `sha256sums`: the sha256 of that release's `SHA256SUMS`; only when `state` is `built`.
 
 A `built` release also has `t3-<V'>-linux-x64.tar.gz` and `SHA256SUMS`. key.yml attests every file of a release before it publishes it, and the body can still be edited afterwards, so a machine reads only the `carry.json` asset, and first checks it and `SHA256SUMS` with:
 
@@ -73,7 +77,7 @@ T3 checks the archive against `SHA256SUMS`. The machine installs it with:
 T3CODE_RELEASE_BASE_URL=https://github.com/nitedani/t3code/releases/download/c/<key>/r<run>.<attempt> t3 update --yes <V'>
 ```
 
-A machine installs the newest release of its key that verifies, whatever its age, only when its `carry.json` names exactly the machine's lines and every one is `carried`; otherwise, and while GitHub can't be read, it keeps what it runs until a Resolve press, so a release with a `doesnt-build` pick is published only for its `cause`. With no picks, the machine takes the plain nightly (`t3 update --yes --channel nightly`; T3 counts `<V'>` as stable). Each run keeps the newest two releases of each requested key and every release younger than a day, and deletes every other `c/*` release with its tag, and every draft older than a day, which a publish that failed left. Each run also re-enables carry.yml and sync.yml through GitHub's API, since GitHub disables a public repo's schedules after 60 days without activity.
+A machine installs the newest release of its key that verifies, whatever its age, only when its `carry.json` names that release's tag and its `SHA256SUMS`, and names exactly the machine's lines with every one `carried`; otherwise, and while GitHub can't be read, it keeps what it runs until a Resolve press, so a `not-built` release is published only for its pick states and their `cause`. With no picks, the machine takes the plain nightly (`t3 update --yes --channel nightly`; T3 counts `<V'>` as stable). Each run keeps the newest two releases of each requested key and every release younger than a day, and deletes every other `c/*` release with its tag, and every draft older than a day, which a publish that failed left. Each run also re-enables carry.yml and sync.yml through GitHub's API, since GitHub disables a public repo's schedules after 60 days without activity.
 
 ## Resolve
 
