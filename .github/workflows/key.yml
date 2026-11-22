@@ -104,9 +104,16 @@ jobs:
               fi
             done
           }
-          # A package whose tests can launch Chromium (web's browser tests, the server's browser integration tests) gets it
-          # first, through that package's Playwright CLI, with the system libraries it lacks, as upstream's ci.yml does.
+          # Chromium for a package's tests that launch it (web's `.browser.test.` files, and those that use Playwright
+          # themselves, as the server's browser integration tests do), through that package's Playwright CLI, with the system
+          # libraries it lacks, as upstream's ci.yml does; tests that launch none don't wait on its download.
           chromium() {
+            local f launches=
+            # shellcheck disable=SC2086 # each file is its own word
+            for f in $2; do
+              if [[ $f == *.browser.test.* ]] || grep -q playwright "$1/$f"; then launches=1; fi
+            done
+            [ -n "$launches" ] || return 0
             local cli=$1/node_modules/playwright/cli.js browser
             [ -f "$cli" ] || cli=$1/node_modules/playwright-core/cli.js
             [ -f "$cli" ] || return 0
@@ -131,7 +138,7 @@ jobs:
             done
             for d in "${!files[@]}"; do
               if [ ! -d "$d/node_modules" ]; then echo "not built here, tests skipped:${files[$d]}"; continue; fi
-              chromium "$d" || return
+              chromium "$d" "${files[$d]}" || return
               # shellcheck disable=SC2086 # each file is its own argument
               (cd "$d" && vp test run ${files[$d]}) || return
             done
