@@ -117,6 +117,10 @@ jobs:
             done
             for d in "${!files[@]}"; do
               if [ ! -d "$d/node_modules" ]; then echo "not built here, tests skipped:${files[$d]}"; continue; fi
+              # A browser test needs the Chromium its package's Playwright drives, installed as upstream's ci.yml does.
+              if [[ ${files[$d]} == *.browser.test.* ]]; then
+                (cd "$d" && node node_modules/playwright/cli.js install --with-deps --only-shell chromium) || return
+              fi
               # shellcheck disable=SC2086 # each file is its own argument
               (cd "$d" && vp test run ${files[$d]}) || return
             done
