@@ -292,9 +292,26 @@ export function monitorWakeLive(projection: {
   );
 }
 
+/** Each monitor update's run, keyed to the latest other run before it: the run it answers for. */
+export function monitorWakeOwners(projection: {
+  readonly runs: ReadonlyArray<OrchestrationV2Run>;
+  readonly messages: ReadonlyArray<MonitorNotice>;
+}): ReadonlyMap<OrchestrationV2Run["id"], OrchestrationV2Run> {
+  const monitorRuns = monitorUpdateRunIds(projection.messages);
+  const owners = new Map<OrchestrationV2Run["id"], OrchestrationV2Run>();
+  let owner: OrchestrationV2Run | undefined;
+  for (const run of projection.runs
+    .filter((candidate) => candidate.startedAt !== null && candidate.status !== "rolled_back")
+    .toSorted((a, b) => (runRanAfter(a, b) ? 1 : -1))) {
+    if (!monitorRuns.has(run.id)) owner = run;
+    else if (owner !== undefined) owners.set(run.id, owner);
+  }
+  return owners;
+}
+
 /**
- * The latest monitor update after `run` the child answered with text: the task's report once the
- * monitor it awaited has ended. Ends at the next run that is not a monitor update.
+ * The latest monitor update answering for `run` that the child answered with text: the task's
+ * report once the monitor it awaited has ended.
  */
 export function delegatedTaskReportWake(
   projection: Pick<OrchestrationV2ThreadProjection, "messages" | "turnItems" | "providerTurns"> & {
@@ -302,22 +319,14 @@ export function delegatedTaskReportWake(
   },
   run: OrchestrationV2Run,
 ): OrchestrationV2Run | undefined {
-  const monitorRuns = monitorUpdateRunIds(projection.messages);
-  const later = projection.runs
-    .filter(
-      (candidate) =>
-        candidate.id !== run.id &&
-        candidate.startedAt !== null &&
-        candidate.status !== "rolled_back" &&
-        runRanAfter(candidate, run),
-    )
-    .toSorted((a, b) => (runRanAfter(a, b) ? 1 : -1));
-  const end = later.findIndex((candidate) => !monitorRuns.has(candidate.id));
-  return (end === -1 ? later : later.slice(0, end)).findLast((wake) => {
-    if (wake.status !== "completed") return false;
-    const report = resultOfRun(projection, wake);
-    return report.messageId !== null || report.turnItemId !== null;
-  });
+  const owners = monitorWakeOwners(projection);
+  return projection.runs
+    .filter((wake) => wake.status === "completed" && owners.get(wake.id)?.id === run.id)
+    .toSorted((a, b) => (runRanAfter(a, b) ? 1 : -1))
+    .findLast((wake) => {
+      const report = resultOfRun(projection, wake);
+      return report.messageId !== null || report.turnItemId !== null;
+    });
 }
 
 /**

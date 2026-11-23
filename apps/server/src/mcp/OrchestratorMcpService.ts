@@ -97,6 +97,7 @@ import {
   subagentStopNotice,
   delegatedTaskProgress,
   delegatedTaskReportRuns,
+  monitorWakeOwners,
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
   DispatchModeLimit,
@@ -642,24 +643,30 @@ function pendingTaskApproval(
   return approval;
 }
 
+/** A child run's follow-up task, or for a monitor update, that of the run it answers for. */
+function followupTaskOfRun(child: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">) {
+  const owners = monitorWakeOwners(child);
+  return (run: OrchestrationV2Run) => run.delegatedTaskId ?? owners.get(run.id)?.delegatedTaskId;
+}
+
 /** Every task `directAppOwnedChildTasks` can return, so callers load only those. */
 function directChildTaskIds(
-  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">,
   returnedRunIds: ReadonlySet<RunId | null>,
 ): ReadonlyArray<NodeId> {
   const ids = new Set<NodeId>();
   if (target.thread.forkedFrom?.type === "node") ids.add(target.thread.forkedFrom.nodeId);
+  const followupTask = followupTaskOfRun(target);
   for (const run of target.runs) {
-    if (returnedRunIds.has(run.id) && run.delegatedTaskId !== undefined) {
-      ids.add(run.delegatedTaskId);
-    }
+    const taskId = followupTask(run);
+    if (returnedRunIds.has(run.id) && taskId !== undefined) ids.add(taskId);
   }
   return [...ids];
 }
 
 function directAppOwnedChildTasks(
   parent: Pick<OrchestrationV2ThreadProjection, "thread" | "subagents">,
-  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">,
   returnedRunIds: ReadonlySet<RunId | null>,
 ): ReadonlyArray<OrchestrationV2Subagent> {
   if (
@@ -676,10 +683,11 @@ function directAppOwnedChildTasks(
         (target.thread.forkedFrom?.type === "node" ? target.thread.forkedFrom.nodeId : undefined) &&
       task.childThreadId === target.thread.id,
   );
+  const followupTask = followupTaskOfRun(target);
   const taskIds = new Set(
     target.runs
       .filter((run) => returnedRunIds.has(run.id))
-      .map((run) => run.delegatedTaskId ?? original?.id),
+      .map((run) => followupTask(run) ?? original?.id),
   );
   return parent.subagents.filter(
     (task) =>
@@ -692,16 +700,17 @@ function directAppOwnedChildTasks(
 // The child's transfers include the results it sent, so the parent's transfers are never read.
 function taskResultTransfer(
   parentThreadId: ThreadId,
-  child: Pick<OrchestrationV2ThreadProjection, "runs" | "contextTransfers">,
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "messages" | "contextTransfers">,
   task: OrchestrationV2Subagent,
 ) {
   const originalRun = delegatedTaskRun(child, task);
+  const followupTask = followupTaskOfRun(child);
   const resultRunIds = new Set(
     child.runs
       .filter(
         (run) =>
-          run.delegatedTaskId === task.id ||
-          (originalRun?.delegatedTaskId === undefined && run.delegatedTaskId === undefined),
+          followupTask(run) === task.id ||
+          (originalRun?.delegatedTaskId === undefined && followupTask(run) === undefined),
       )
       .map((run) => run.id),
   );
@@ -1568,12 +1577,11 @@ const make = Effect.gen(function* () {
       shell.lineage.relationshipToParent === "subagent"
     ) {
       const target = yield* threadManagement
-        .getProjectThreadRecords(input, [
-          "runs",
-          "providerTurns",
-          "runtimeRequests",
-          "contextTransfers",
-        ])
+        .getProjectThreadRecords(
+          input,
+          ["runs", "messages", "providerTurns", "runtimeRequests", "contextTransfers"],
+          { messageRoles: ["user"], delegatedTaskMessagesOnly: true },
+        )
         .pipe(Effect.mapError(threadManagementFailure));
       return { parent, target, shell, runCount: target.runs.length } as const;
     }
@@ -1591,7 +1599,7 @@ const make = Effect.gen(function* () {
         providerTurnAttemptIds: records.runs.flatMap((run) => run.activeAttemptId ?? []),
       })
       .pipe(Effect.mapError(threadManagementFailure));
-    const target = { ...records, providerTurns, contextTransfers: [] };
+    const target = { ...records, providerTurns, messages: [], contextTransfers: [] };
     return { parent, target, shell, runCount } as const;
   });
 
@@ -3647,7 +3655,11 @@ const make = Effect.gen(function* () {
               parentThreadId: parent.thread.id,
               items,
               task,
-              target: { ...target, ...resultRecords },
+              target: {
+                ...target,
+                ...resultRecords,
+                messages: [...target.messages, ...resultRecords.messages],
+              },
             })
           ) {
             yield* readTask(

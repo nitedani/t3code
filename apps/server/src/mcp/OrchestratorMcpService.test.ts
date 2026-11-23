@@ -25,6 +25,7 @@ import {
   ProviderTurnId,
   RunId,
   ThreadId,
+  TurnItemId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
@@ -615,6 +616,193 @@ describe("OrchestratorMcpService", () => {
         assert.equal(quiet.summary, silent);
         assert.equal(quiet.latestTerminalSummary, "REPORT-B");
         assert.equal((yield* service.taskStatus(scope, taskB)).summary, "REPORT-B");
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("links and acknowledges a follow-up's result from the monitor update it answered", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-wake-parent");
+      const childThreadId = ThreadId.make("thread:mcp-wake-child");
+      const originalTaskId = NodeId.make("node:mcp-wake-original");
+      const followupId = NodeId.make("node:mcp-wake-followup");
+      const resultTransferId = ContextTransferId.make("transfer:mcp-wake-result");
+      const answer = "The numbers are in.";
+      const at = (minute: number) => DateTime.makeUnsafe(`2026-10-24T10:0${minute}:00Z`);
+      const run = (ordinal: number, delegatedTaskId?: NodeId) => ({
+        id: RunId.make(`run:mcp-wake-${ordinal}`),
+        ordinal,
+        status: "completed",
+        ...(delegatedTaskId === undefined ? {} : { delegatedTaskId }),
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-terra" },
+        activeAttemptId: null,
+        requestedAt: at(ordinal),
+        startedAt: at(ordinal),
+        completedAt: at(ordinal),
+      });
+      const [original, followup, wake] = [run(1), run(2, followupId), run(3)];
+      const assistant = (target: typeof original, text: string) => ({
+        id: MessageId.make(`message:mcp-wake-${target.ordinal}`),
+        runId: target.id,
+        role: "assistant",
+        text,
+        createdAt: target.completedAt,
+        updatedAt: target.completedAt,
+      });
+      const parentProjection = {
+        thread: { id: parentThreadId, runtimeMode: "full-access", interactionMode: "default" },
+        runs: [],
+        contextTransfers: [],
+        subagents: [
+          {
+            id: followupId,
+            threadId: parentThreadId,
+            origin: "app_owned",
+            childThreadId,
+            driver: "codex",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            result: answer,
+            completionDelivery: { state: "claimed", observedByRunId: null },
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const childThread = {
+        id: childThreadId,
+        projectId: ProjectId.make("project:mcp-wake"),
+        title: "Child task",
+        createdBy: "agent",
+        creationSource: "mcp",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-terra" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        archivedAt: null,
+        deletedAt: null,
+        createdAt: at(0),
+        updatedAt: at(3),
+        lineage: {
+          parentThreadId,
+          relationshipToParent: "subagent",
+          rootThreadId: parentThreadId,
+        },
+        forkedFrom: { type: "node", nodeId: originalTaskId },
+      };
+      const childProjection = {
+        thread: childThread,
+        runs: [original, followup, wake],
+        contextTransfers: [
+          {
+            id: resultTransferId,
+            type: "subagent_result",
+            sourceThreadId: childThreadId,
+            targetThreadId: parentThreadId,
+            sourcePoint: { threadId: childThreadId, runId: wake.id },
+          },
+        ],
+        messages: [
+          assistant(followup, "Waiting for its numbers."),
+          {
+            id: MessageId.make("message:mcp-wake-update"),
+            runId: wake.id,
+            role: "user",
+            text: "Monitor reported new output.",
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: "Monitor updated",
+            },
+            createdAt: wake.startedAt,
+            updatedAt: wake.startedAt,
+          },
+          assistant(wake, answer),
+        ],
+        subagents: [],
+        providerThreads: [],
+        providerTurns: [],
+        runtimeRequests: [],
+        turnItems: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      // The mock applies only the role filter: a result read sees no monitor update.
+      const childRecords = (filter?: ProjectionRecordFilter) => ({
+        ...childProjection,
+        messages: childProjection.messages.filter(
+          (message) => filter?.messageRoles?.includes(message.role) ?? true,
+        ),
+      });
+      const acknowledged: Array<NodeId> = [];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId, _fields, filter) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection : childRecords(filter)),
+          getProjectThreadRecords: (_input, _fields, filter) =>
+            Effect.succeed(childRecords(filter)),
+          getThreadShell: () =>
+            Effect.succeed(childThread as unknown as OrchestrationV2ThreadShell),
+          getTimelinePage: () =>
+            Effect.succeed({
+              items: [
+                {
+                  position: 0,
+                  visibility: "visible",
+                  sourceThreadId: childThreadId,
+                  sourceItemId: TurnItemId.make("turn-item:mcp-wake-answer"),
+                  item: {
+                    type: "assistant_message",
+                    runId: wake.id,
+                    messageId: MessageId.make("message:mcp-wake-3"),
+                    status: "completed",
+                    text: answer,
+                    updatedAt: wake.completedAt,
+                  },
+                },
+              ] as unknown as OrchestrationV2ThreadProjection["visibleTurnItems"],
+              totalItems: 1,
+              hasMore: false,
+              hasEarlier: false,
+            }),
+          delegatedTaskResultPending: () => Effect.succeed(false),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              if (command.type === "delegated_task.completion-delivery.acknowledge") {
+                acknowledged.push(command.taskId);
+              }
+              return {} as never;
+            }),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-wake"),
+        requestNamespace: "provider-session:mcp-wake",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-wake",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        yield* service.readThread(scope, { threadId: childThreadId });
+        assert.deepEqual(acknowledged, [followupId]);
+        const status = yield* service.taskStatus(scope, followupId);
+        assert.equal(status.summary, answer);
+        assert.equal(status.resultContextTransferId, resultTransferId);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );
