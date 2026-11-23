@@ -212,6 +212,7 @@ import {
   subagentResultForRun,
   delegatedTaskProgress,
   delegatedTaskReportRuns,
+  delegatedTaskReportWake,
   monitorUpdateRunIds,
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
@@ -15239,7 +15240,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           taskRuns,
           options.task.cancelledRunId === undefined
             ? childControls
-            : { subagents: childControls.subagents, providerThreads: [] },
+            : { ...childControls, runs: [], providerThreads: [] },
         )
       )
         return;
@@ -15262,7 +15263,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           reportFrom,
         );
       }
-      const resultRunIds = [childRun.id, ...reportRuns.map((run) => run.id)];
+      const laterRuns = childControls.runs.filter((run) => runRanAfter(run, childRun));
+      const resultRuns = [childRun, ...laterRuns, ...reportRuns];
+      const resultRunIds = resultRuns.map((run) => run.id);
       const childResult = yield* projectionStore.getThreadRecords(
         childThreadId,
         ["messages", "turnItems", "providerTurns", "attempts"],
@@ -15271,9 +15274,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           messageRunIds: resultRunIds,
           turnItemRunIds: resultRunIds,
           turnItemTypes: [...SUBAGENT_RESULT_TURN_ITEM_TYPES, "run_interrupt_request"],
-          providerTurnAttemptIds: [childRun, ...reportRuns].flatMap(
-            (run) => run.activeAttemptId ?? [],
-          ),
+          providerTurnAttemptIds: resultRuns.flatMap((run) => run.activeAttemptId ?? []),
           attemptIds: childRun.activeAttemptId === null ? [] : [childRun.activeAttemptId],
         },
       );
@@ -15294,6 +15295,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerTurns: [...childResult.providerTurns, ...steeredTurns],
         attempts: childResult.attempts,
       };
+      const reportWake = delegatedTaskReportWake(
+        {
+          ...childProjection,
+          runs: childControls.runs,
+          messages: [...childControls.messages, ...childResult.messages],
+        },
+        childRun,
+      );
       const parentThreadId = childControls.thread.lineage.parentThreadId;
       // The task's node and turn item share its id.
       const parentTask = yield* projectionStore.getThreadRecords(
@@ -15338,7 +15347,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           transfer.type === "subagent_result" &&
           transfer.sourceThreadId === childThreadId &&
           transfer.targetThreadId === parentThreadId &&
-          (transfer.sourcePoint.runId === childRun.id ||
+          (transfer.sourcePoint.runId === (reportWake ?? childRun).id ||
             (options.task.id === forkedFrom.nodeId && transfer.sourcePoint.runId === undefined)),
       );
       if (existingResultTransfer !== undefined) {
@@ -15346,7 +15355,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const now = yield* DateTime.now;
-      const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      const result = subagentResultForRun(
+        childProjection,
+        reportWake ?? { ...childRun, status: outcome },
+      );
       const { parentRun, ...parentProjection } = yield* readDelegatedCompletionPlanRecords(
         parentThreadId,
         task,
@@ -15388,7 +15400,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         sourceThreadId: childThreadId,
         targetThreadId: parentThreadId,
         sourcePoint: {
-          ...contextSourcePointForRun(childProjection, childRun),
+          ...contextSourcePointForRun(childProjection, reportWake ?? childRun),
           ...(result.turnItemId === null ? {} : { turnItemId: result.turnItemId }),
         },
         basePoint: null,

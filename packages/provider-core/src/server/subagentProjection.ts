@@ -278,6 +278,48 @@ export function delegatedTaskReportRuns(
   return end === -1 ? earlier : earlier.slice(0, end);
 }
 
+/** The child is answering a monitor update, or queued to, so its task's report may still follow. */
+export function monitorWakeLive(projection: {
+  readonly runs: ReadonlyArray<OrchestrationV2Run>;
+  readonly messages: ReadonlyArray<MonitorNotice>;
+}): boolean {
+  const monitorRuns = monitorUpdateRunIds(projection.messages);
+  return projection.runs.some(
+    (run) =>
+      monitorRuns.has(run.id) &&
+      ["queued", "preparing", "starting", "running", "waiting"].includes(run.status) &&
+      !(run.status === "queued" && run.queueHeld === true),
+  );
+}
+
+/**
+ * The latest monitor update after `run` the child answered with text: the task's report once the
+ * monitor it awaited has ended. Ends at the next run that is not a monitor update.
+ */
+export function delegatedTaskReportWake(
+  projection: Pick<OrchestrationV2ThreadProjection, "messages" | "turnItems" | "providerTurns"> & {
+    readonly runs: ReadonlyArray<OrchestrationV2Run>;
+  },
+  run: OrchestrationV2Run,
+): OrchestrationV2Run | undefined {
+  const monitorRuns = monitorUpdateRunIds(projection.messages);
+  const later = projection.runs
+    .filter(
+      (candidate) =>
+        candidate.id !== run.id &&
+        candidate.startedAt !== null &&
+        candidate.status !== "rolled_back" &&
+        runRanAfter(candidate, run),
+    )
+    .toSorted((a, b) => (runRanAfter(a, b) ? 1 : -1));
+  const end = later.findIndex((candidate) => !monitorRuns.has(candidate.id));
+  return (end === -1 ? later : later.slice(0, end)).findLast((wake) => {
+    if (wake.status !== "completed") return false;
+    const report = resultOfRun(projection, wake);
+    return report.messageId !== null || report.turnItemId !== null;
+  });
+}
+
 /**
  * `runs` scopes where a run that completed without saying anything finds its report, see
  * `delegatedTaskReportRuns`. The projection must hold the assistant records of every run given.
@@ -411,7 +453,8 @@ export function delegatedTaskProgress(projection: {
     (run) => !monitorRuns.has(run.id) && run.status !== "rolled_back",
   );
   const held = (run: OrchestrationV2Run) => run.status === "queued" && run.queueHeld === true;
-  const active = workRuns.some((run) => !terminal(run.status) && !held(run));
+  const active =
+    workRuns.some((run) => !terminal(run.status) && !held(run)) || monitorWakeLive(projection);
   // Held wakes wait on nobody, but a held message the user wrote is the child's next work.
   const userRunIds = new Set(
     projection.messages.flatMap((message) =>

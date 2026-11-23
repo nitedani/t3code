@@ -4624,9 +4624,16 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       pendingBackgroundTasks: [{ taskId: "dev-server", kind: "command" as const }],
       released: false,
     },
+    {
+      name: "keeps while it answers a monitor update, then reports that answer and releases",
+      key: "-monitor-wake",
+      pendingBackgroundTasks: [{ taskId: "items-lat", kind: "monitor", awaited: true } as const],
+      released: true,
+      monitorWake: true,
+    },
   ])(
     "queues a child result without creating a provider history handoff and $name its process",
-    ({ key, pendingBackgroundTasks, released }) =>
+    ({ key, pendingBackgroundTasks, released, monitorWake }) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
@@ -4709,12 +4716,101 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
             },
           ],
         });
+        if (monitorWake) {
+          const wakeMessageId = MessageId.make(`message:result-message${key}`);
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "agent",
+            creationSource: "provider",
+            commandId: CommandId.make(`command:result-message${key}`),
+            threadId: child.childThreadId,
+            messageId: wakeMessageId,
+            text: "Monitor reported new output.",
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: "Monitor updated",
+            },
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+          });
+          const wake = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+            (run) => run.userMessageId === wakeMessageId,
+          )!;
+          // The awaited monitor ends while the child is still answering its update.
+          const answer = (status: "running" | "completed") =>
+            eventSink.write({
+              commandId: CommandId.make(`command:result-message${key}-${status}`),
+              events: [
+                {
+                  id: EventId.make(`event:result-message${key}-monitor-ended-${status}`),
+                  type: "provider-thread.updated",
+                  threadId: child.childThreadId,
+                  occurredAt: now,
+                  payload: {
+                    ...parent.providerThreads[0]!,
+                    id: providerThreadId,
+                    appThreadId: child.childThreadId,
+                    pendingBackgroundTasks: [],
+                  },
+                },
+                {
+                  id: EventId.make(`event:result-message${key}-answer-${status}`),
+                  type: "message.updated",
+                  threadId: child.childThreadId,
+                  runId: wake.id,
+                  occurredAt: now,
+                  payload: {
+                    id: MessageId.make(`message:result-message${key}-answer`),
+                    threadId: child.childThreadId,
+                    runId: wake.id,
+                    nodeId: null,
+                    role: "assistant",
+                    text: "The numbers are in.",
+                    attachments: [],
+                    streaming: false,
+                    createdBy: "agent",
+                    creationSource: "server",
+                    createdAt: now,
+                    updatedAt: now,
+                  },
+                },
+                {
+                  id: EventId.make(`event:result-message${key}-${status}`),
+                  type: "run.updated",
+                  threadId: child.childThreadId,
+                  runId: wake.id,
+                  occurredAt: now,
+                  payload: {
+                    ...wake,
+                    status,
+                    startedAt: now,
+                    completedAt: status === "running" ? null : now,
+                  },
+                },
+              ],
+            });
+          yield* answer("running");
+          yield* orchestrator.recoverDelegatedTasks;
+          const answering = yield* orchestrator.getThreadProjection(threadId);
+          assert.notEqual(
+            answering.subagents.find((candidate) => candidate.id === child.taskId)?.status,
+            "completed",
+          );
+          assert.isEmpty(answering.contextTransfers);
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(child.childThreadId)).providerSessions.length,
+            1,
+          );
+          yield* answer("completed");
+        }
 
         yield* orchestrator.recoverDelegatedTasks;
         const recovered = yield* orchestrator.getThreadProjection(threadId);
         const task = recovered.subagents.find((candidate) => candidate.id === child.taskId)!;
         assert.equal(task.status, "completed");
         assert.isNotNull(task.result);
+        if (monitorWake) assert.equal(task.result, "The numbers are in.");
         assert.isEmpty(recovered.contextHandoffs);
         assert.equal(recovered.contextTransfers.length, 1);
         // A one-process-per-thread child releases its process once its result is recorded,

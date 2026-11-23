@@ -24,6 +24,7 @@ import * as Layer from "effect/Layer";
 import {
   makeSubagentChildThread,
   delegatedTaskProgress,
+  delegatedTaskReportWake,
   subagentResultForRun,
   makeSubagentConversationArtifacts,
   endOrphanedNativeSubagent,
@@ -348,37 +349,59 @@ it("waits for nested work and retains the report across monitor acknowledgements
     ordinal: 3,
     now: childCreatedAt,
   });
+  const monitorUpdate = {
+    ...artifacts.message,
+    runId: monitor.id,
+    notification: {
+      source: { kind: "monitor" as const },
+      outcome: "updated" as const,
+      summary: "Monitor update",
+    },
+  };
   const progress = delegatedTaskProgress({
     ...projection,
     runs: [run, report, monitor],
-    messages: [
-      {
-        ...artifacts.message,
-        runId: monitor.id,
-        notification: {
-          source: { kind: "monitor" },
-          outcome: "updated",
-          summary: "Monitor update",
-        },
-      },
-    ],
+    messages: [monitorUpdate],
   });
   assert.equal(progress.state, "result_available");
   assert.equal(progress.resultRun?.id, report.id);
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [run, report, { ...monitor, status: "running", completedAt: null }],
+      messages: [monitorUpdate],
+    }).state,
+    "working",
+  );
+  const answer = makeSubagentConversationArtifacts({
+    messageId: MessageId.make("monitor-answer"),
+    turnItemId: TurnItemId.make("monitor-answer-item"),
+    threadId: parentThreadId,
+    rootNodeId: NodeId.make("root"),
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    role: "assistant",
+    text: "The numbers are in.",
+    ordinal: 4,
+    now: childCreatedAt,
+  });
+  const answered = {
+    ...projection,
+    runs: [run, report, monitor],
+    messages: [monitorUpdate, { ...answer.message, runId: monitor.id }],
+    turnItems: [{ ...answer.turnItem, runId: monitor.id }],
+  };
+  assert.equal(delegatedTaskReportWake(answered, report)?.id, monitor.id);
+  assert.isUndefined(
+    delegatedTaskReportWake({ ...answered, messages: [monitorUpdate], turnItems: [] }, report),
+  );
   const ended = { ...report, id: RunId.make("monitor-ended"), ordinal: 4 };
   const afterMonitorEnded = delegatedTaskProgress({
     ...projection,
     runs: [run, report, monitor, ended],
     messages: [
-      {
-        ...artifacts.message,
-        runId: monitor.id,
-        notification: {
-          source: { kind: "monitor" },
-          outcome: "updated",
-          summary: "Monitor update",
-        },
-      },
+      monitorUpdate,
       {
         ...artifacts.message,
         runId: ended.id,

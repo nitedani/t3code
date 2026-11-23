@@ -11,7 +11,10 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentProjection";
+import {
+  monitorWakeLive,
+  subagentHoldsCompletion,
+} from "@t3tools/provider-core/server/subagentProjection";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { latestRootProviderFailure, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -336,11 +339,11 @@ export function delegatedTaskRuns(
 
 /**
  * A follow-up task's runs still owe a subagent they started its result, or still await
- * background work they started, as the original task waits on both.
+ * background work they started or the child's answer to a monitor update, as the original task does.
  */
 export function delegatedTaskAwaitsWork(
   runs: ReadonlyArray<OrchestrationV2Run>,
-  child: {
+  child: Parameters<typeof monitorWakeLive>[0] & {
     readonly subagents: ReadonlyArray<
       Pick<OrchestrationV2Subagent, "runId" | "status" | "completionDelivery">
     >;
@@ -351,6 +354,7 @@ export function delegatedTaskAwaitsWork(
 ): boolean {
   const runIds = new Set<string | null>(runs.map((run) => run.id));
   return (
+    monitorWakeLive(child) ||
     child.subagents.some((task) => runIds.has(task.runId) && subagentHoldsCompletion(task)) ||
     child.providerThreads.some((thread) =>
       backgroundWorkHoldsCompletion(
