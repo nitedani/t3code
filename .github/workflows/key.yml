@@ -104,6 +104,24 @@ jobs:
               fi
             done
           }
+          # Chromium for a package's tests that launch it (web's `.browser.test.` files, and those that use Playwright
+          # themselves, as the server's browser integration tests do), through that package's Playwright CLI, with the system
+          # libraries it lacks, as upstream's ci.yml does; tests that launch none don't wait on its download.
+          chromium() {
+            local f launches=
+            # shellcheck disable=SC2086 # each file is its own word
+            for f in $2; do
+              if [[ $f == *.browser.test.* ]] || grep -q playwright "$1/$f"; then launches=1; fi
+            done
+            [ -n "$launches" ] || return 0
+            local cli=$1/node_modules/playwright/cli.js browser
+            [ -f "$cli" ] || cli=$1/node_modules/playwright-core/cli.js
+            [ -f "$cli" ] || return 0
+            node "$cli" install --only-shell chromium || return
+            browser=$(find "$HOME/.cache/ms-playwright" -name chrome-headless-shell -type f -print -quit)
+            [ -n "$browser" ] || return
+            if ldd "$browser" | grep -q '=> not found'; then node "$cli" install-deps chromium || return; fi
+          }
           # Each test file runs inside its own package with `vp test run <files>`, as upstream's windows-tests.yml runs chosen
           # files: from the repo root its config loads every package's, apps/mobile's too, which this build doesn't install.
           # A package this build doesn't install ships nothing in it, so its tests are skipped.
@@ -113,10 +131,14 @@ jobs:
             for f; do
               d=$(dirname "$f")
               while [ "$d" != . ] && [ ! -f "$d/package.json" ]; do d=$(dirname "$d"); done
+              # The kde-snap-shot tests have no package of their own: apps/desktop's config runs them (its unit project's
+              # include), so they go there by their path from it.
+              case $f in native/kde-snap-shot/*) files[apps/desktop]+=" ../../$f"; continue ;; esac
               files[$d]+=" ${f#"$d"/}"
             done
             for d in "${!files[@]}"; do
               if [ ! -d "$d/node_modules" ]; then echo "not built here, tests skipped:${files[$d]}"; continue; fi
+              chromium "$d" "${files[$d]}" || return
               # shellcheck disable=SC2086 # each file is its own argument
               (cd "$d" && vp test run ${files[$d]}) || return
             done
