@@ -33,5 +33,25 @@ export async function antigravityManagedPath(
     : undefined;
 }
 
-export const antigravityProfileRoot = (profileDirectory: string) =>
-  NodeFSP.realpath(profileDirectory).catch(() => undefined);
+/** A managed launcher can use an account-specific ACP directory under the provider profile. */
+export async function antigravitySessionRoot(profileDirectory: string, sessionId: string) {
+  const root = await NodeFSP.realpath(profileDirectory).catch(() => undefined);
+  if (root === undefined) return undefined;
+  const accountDirs = (await NodeFSP.readdir(root).catch(() => [])).filter((name) =>
+    /^antigravity-acp-[a-f0-9]{24}$/.test(name),
+  );
+  const dirs = ["antigravity-acp", ...accountDirs];
+  const matches = await Promise.all(
+    dirs.map(async (dir) => {
+      const owned =
+        (await antigravityManagedPath(root, [dir, "conversations", `${sessionId}.db`], "file")) ??
+        (await antigravityManagedPath(root, [dir, "brain", sessionId], "directory")) ??
+        (await antigravityManagedPath(root, [dir, "conversations", `${sessionId}.meta`], "file"));
+      return owned === undefined ? [] : [NodePath.join(root, dir)];
+    }),
+  );
+  const found = matches.flat();
+  if (found.length === 1) return found[0];
+  if (found.length > 1 || accountDirs.length > 0) return undefined;
+  return (await antigravityManagedPath(root, ["antigravity-acp"], "directory"))?.path;
+}

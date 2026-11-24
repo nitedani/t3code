@@ -11,7 +11,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
-import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
+import { antigravityManagedPath, antigravitySessionRoot } from "./AntigravityProfilePaths.ts";
 
 // CORTEX_STEP_TYPE_ERROR_MESSAGE in the native trajectory.
 const ERROR_STEP_TYPE = 17;
@@ -196,7 +196,7 @@ function turnFailure(
     : reusable(failure);
 }
 
-const conversationSegments = ["antigravity-acp", "conversations"];
+const conversationSegments = ["conversations"];
 
 /**
  * Antigravity reports an upstream API failure as a chat message and `end_turn`. Its
@@ -214,7 +214,7 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
   const segments = [...conversationSegments, `${sessionId}.db`];
   const before = yield* Effect.tryPromise({
     try: async () => {
-      const root = await antigravityProfileRoot(profileDirectory);
+      const root = await antigravitySessionRoot(profileDirectory, sessionId);
       if (root === undefined) return undefined;
       if ((await antigravityManagedPath(root, conversationSegments, "directory")) === undefined) {
         return undefined;

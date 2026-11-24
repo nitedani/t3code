@@ -8,7 +8,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { protoFields } from "./AntigravityChildWork.ts";
-import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
+import { antigravityManagedPath, antigravitySessionRoot } from "./AntigravityProfilePaths.ts";
 
 const isNativeSessionId = Schema.is(Schema.String.check(Schema.isUUID(4)));
 const decodeSessionMetadata = Schema.decodeEffect(
@@ -55,17 +55,11 @@ function decodeTrajectoryOwnership(blob: Uint8Array):
 }
 
 async function readDatabaseWorkspacePaths(
-  profileDirectory: string,
+  appDirectory: string,
   sessionId: string,
 ): Promise<ReadonlyArray<string> | undefined> {
-  const profileRoot = await antigravityProfileRoot(profileDirectory);
-  if (profileRoot === undefined) return undefined;
   const databasePath = (
-    await antigravityManagedPath(
-      profileRoot,
-      ["antigravity-acp", "conversations", `${sessionId}.db`],
-      "file",
-    )
+    await antigravityManagedPath(appDirectory, ["conversations", `${sessionId}.db`], "file")
   )?.path;
   if (databasePath === undefined) return undefined;
 
@@ -127,7 +121,10 @@ export const removeAntigravitySessionFiles = Effect.fn("removeAntigravitySession
     }
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const acpDirectory = path.join(input.profileDirectory, "antigravity-acp");
+    const acpDirectory = yield* Effect.promise(() =>
+      antigravitySessionRoot(input.profileDirectory, sessionId),
+    );
+    if (acpDirectory === undefined) return;
     const base = path.join(acpDirectory, "conversations", sessionId);
 
     if (yield* fs.exists(`${base}.meta`)) {
@@ -140,7 +137,7 @@ export const removeAntigravitySessionFiles = Effect.fn("removeAntigravitySession
     } else {
       // Antigravity CLI 1.5+ writes no `.meta` sidecar; workspace URIs live in the session DB.
       const workspacePaths = yield* Effect.promise(() =>
-        readDatabaseWorkspacePaths(input.profileDirectory, sessionId),
+        readDatabaseWorkspacePaths(acpDirectory, sessionId),
       );
       if (workspacePaths === undefined || workspacePaths.length === 0) {
         return;

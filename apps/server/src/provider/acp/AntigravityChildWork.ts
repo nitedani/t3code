@@ -13,7 +13,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
+import { antigravityManagedPath, antigravitySessionRoot } from "./AntigravityProfilePaths.ts";
 import { boundAntigravityToolText, isCutAntigravityToolText } from "./AntigravityProtocol.ts";
 
 // Field numbers from the runtime's trajectory protos (exa.cortex_pb).
@@ -377,14 +377,7 @@ async function readChildTranscript(
   const expected = (
     await antigravityManagedPath(
       profileRoot,
-      [
-        "antigravity-acp",
-        "brain",
-        child.conversationId,
-        ".system_generated",
-        "logs",
-        "transcript.jsonl",
-      ],
+      ["brain", child.conversationId, ".system_generated", "logs", "transcript.jsonl"],
       "file",
     )
   )?.path;
@@ -445,7 +438,7 @@ export const readAntigravityChildWork = Effect.fn("readAntigravityChildWork")(fu
   if (!NATIVE_ID.test(input.rootSessionId)) return [];
   return yield* Effect.tryPromise({
     try: async (): Promise<ReadonlyArray<OrchestrationV2NativeChildWork>> => {
-      const profileRoot = await antigravityProfileRoot(input.profileDirectory);
+      const profileRoot = await antigravitySessionRoot(input.profileDirectory, input.rootSessionId);
       if (profileRoot === undefined) return [];
       let record = await findDetachedInvokeRecord(
         profileRoot,
@@ -456,7 +449,7 @@ export const readAntigravityChildWork = Effect.fn("readAntigravityChildWork")(fu
         const databasePath = (
           await antigravityManagedPath(
             profileRoot,
-            ["antigravity-acp", "conversations", `${input.rootSessionId}.db`],
+            ["conversations", `${input.rootSessionId}.db`],
             "file",
           )
         )?.path;
@@ -538,7 +531,7 @@ const decodeDetachedSubagent = Schema.decodeUnknownOption(
 
 /** A conversation's inbox. Throws past a bound or on a file it cannot read, so nothing is proven. */
 async function readInbox(profileRoot: string, conversationId: string) {
-  const directory = ["antigravity-acp", "brain", conversationId, ".system_generated", "messages"];
+  const directory = ["brain", conversationId, ".system_generated", "messages"];
   const inbox = await antigravityManagedPath(profileRoot, directory, "directory");
   if (inbox === undefined) return [];
   // `read.json` is the runtime's read receipts, not a message.
@@ -563,7 +556,7 @@ async function listDetachedChildIds(
 ): Promise<ReadonlyArray<string> | undefined> {
   const children = await antigravityManagedPath(
     profileRoot,
-    ["antigravity-acp", "brain", rootSessionId, ".system_generated", "subagents"],
+    ["brain", rootSessionId, ".system_generated", "subagents"],
     "directory",
   );
   if (children === undefined) return undefined;
@@ -588,14 +581,7 @@ function detachedLaunchCall(message: ChildMessage, rootSessionId: string) {
 async function readDetachedSubagent(profileRoot: string, rootSessionId: string, childId: string) {
   const file = await antigravityManagedPath(
     profileRoot,
-    [
-      "antigravity-acp",
-      "brain",
-      rootSessionId,
-      ".system_generated",
-      "subagents",
-      `${childId}.json`,
-    ],
+    ["brain", rootSessionId, ".system_generated", "subagents", `${childId}.json`],
     "file",
   );
   if (file === undefined || file.info.size > MAX_STEP_BYTES) return undefined;
@@ -672,7 +658,7 @@ async function hasUnreadWakingInboxMessage(
   profileRoot: string,
   sessionId: string,
 ): Promise<boolean> {
-  const directory = ["antigravity-acp", "brain", sessionId, ".system_generated", "messages"];
+  const directory = ["brain", sessionId, ".system_generated", "messages"];
   const inbox = await antigravityManagedPath(profileRoot, directory, "directory");
   if (inbox === undefined) return false;
   const entries = await NodeFSP.readdir(inbox.path).catch(() => undefined);
@@ -714,7 +700,7 @@ async function readLastTranscriptLine(
 ): Promise<Schema.Schema.Type<typeof TranscriptLine> | undefined> {
   const transcript = await antigravityManagedPath(
     profileRoot,
-    ["antigravity-acp", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl"],
+    ["brain", sessionId, ".system_generated", "logs", "transcript.jsonl"],
     "file",
   );
   if (transcript === undefined) return undefined;
@@ -758,7 +744,7 @@ export const readAntigravityPendingReply = Effect.fn("readAntigravityPendingRepl
   function* (input: { readonly profileDirectory: string; readonly sessionId: string }) {
     if (!NATIVE_ID.test(input.sessionId)) return false;
     const read = async (): Promise<boolean> => {
-      const profileRoot = await antigravityProfileRoot(input.profileDirectory);
+      const profileRoot = await antigravitySessionRoot(input.profileDirectory, input.sessionId);
       if (profileRoot === undefined) return false;
       if (await hasUnreadWakingInboxMessage(profileRoot, input.sessionId)) return true;
       const lastStep = await readLastTranscriptLine(profileRoot, input.sessionId);
@@ -790,7 +776,7 @@ export const readAntigravityChildrenAtWork = Effect.fn("readAntigravityChildrenA
   }) {
     if (!NATIVE_ID.test(input.rootSessionId)) return [];
     const read = async (): Promise<ReadonlyArray<string>> => {
-      const profileRoot = await antigravityProfileRoot(input.profileDirectory);
+      const profileRoot = await antigravitySessionRoot(input.profileDirectory, input.rootSessionId);
       const childIds =
         profileRoot === undefined
           ? undefined

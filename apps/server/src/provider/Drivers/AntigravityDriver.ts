@@ -155,6 +155,14 @@ export const AntigravityDriver: ProviderDriver<
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
     const settings = { ...config, enabled } satisfies AntigravitySettings;
+    const configuredDefault = settings.defaultModel?.trim() || undefined;
+    const preferredCatalog = currentCatalog.pipe(
+      Effect.map((catalog) =>
+        configuredDefault === undefined
+          ? catalog
+          : { models: catalog?.models ?? [], defaultChatModel: configuredDefault },
+      ),
+    );
     const auth: AntigravityAuthConfig = {
       authMethod: settings.authMethod,
       // The instance registry has already read a referenced key from its secret provider.
@@ -220,7 +228,7 @@ export const AntigravityDriver: ProviderDriver<
       continuationGroupKey: continuationIdentity.continuationKey,
     });
     const classifyModels = (draft: ServerProviderDraft) =>
-      currentCatalog.pipe(
+      preferredCatalog.pipe(
         Effect.map((catalog) => stampIdentity(ModelCatalog.applyModelCatalog(draft, catalog))),
       );
 
@@ -321,12 +329,11 @@ export const AntigravityDriver: ProviderDriver<
       // `buildAntigravityAcpSpawnInput` sets `extendEnv: false`, so thread variables only reach the
       // agent's shell through `baseEnv`.
       const { processEnvironment: threadEnvironment, ...runtimeInput } = input;
-      const { executable, spawn } = yield* prepareSpawn(
-        runtimeInput.cwd,
-        threadEnvironment === undefined
-          ? processEnvironment
-          : { ...processEnvironment, ...threadEnvironment },
-      );
+      const { executable, spawn } = yield* prepareSpawn(runtimeInput.cwd, {
+        ...processEnvironment,
+        ...threadEnvironment,
+        T3CODE_ANTIGRAVITY_RESUME_SESSION_ID: runtimeInput.resumeSessionId,
+      });
       const runtime = yield* makeAntigravityAcpRuntime({
         ...runtimeInput,
         runtimeVersion: executable.version,
@@ -618,7 +625,7 @@ export const AntigravityDriver: ProviderDriver<
           }),
       ),
     );
-    const defaultModel = currentCatalog.pipe(Effect.map((catalog) => catalog?.defaultChatModel));
+    const defaultModel = preferredCatalog.pipe(Effect.map((catalog) => catalog?.defaultChatModel));
     const orchestrationAdapter = yield* makeAntigravityAdapterV2({
       instanceId,
       selfInvocation,

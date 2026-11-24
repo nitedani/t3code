@@ -939,12 +939,19 @@ export const AntigravitySettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "Automatic", clearWhenEmpty: "persist" },
       }),
     ),
+    defaultModel: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "Default model",
+        description: "Model ID to prefer for new Antigravity sessions on this instance.",
+        providerSettingsForm: { placeholder: "Use the provider default", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
-  { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath"] },
+  { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath", "defaultModel"] },
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
