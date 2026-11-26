@@ -339,8 +339,8 @@ function keptWithSideChats(
 }
 
 /**
- * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list.
- * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
+ * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list,
+ * and the open pull requests of every expired thread they hold, oldest first. A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
  * unarchiving counts as a change.
  */
 function planThreadCleanup({
@@ -355,14 +355,17 @@ function planThreadCleanup({
   readonly now: number;
 }) {
   const { settledThreadsAfterDays, archivedThreadsAfterDays } = settings.storageCleanup;
-  const oldestExpired = <Candidate extends { readonly sinceMs: number }>(
+  const expired = <Candidate extends { readonly sinceMs: number }>(
     days: number,
     candidates: ReadonlyArray<Candidate>,
   ) =>
     candidates
       .filter((candidate) => candidate.sinceMs <= now - days * DAY_MS)
-      .toSorted((left, right) => left.sinceMs - right.sinceMs)
-      .slice(0, THREADS_PER_SWEEP);
+      .toSorted((left, right) => left.sinceMs - right.sinceMs);
+  const oldestExpired = <Candidate extends { readonly sinceMs: number }>(
+    days: number,
+    candidates: ReadonlyArray<Candidate>,
+  ) => expired(days, candidates).slice(0, THREADS_PER_SWEEP);
   const idle = threads.filter(
     (thread) =>
       // Side chats follow their parent; subagent threads are not cleaned.
@@ -400,8 +403,7 @@ function planThreadCleanup({
                 ],
           ),
         );
-  if (settledThreadsAfterDays === null)
-    return { deletions, archives: [], pullRequestsToRefresh: [] };
+  if (settledThreadsAfterDays === null) return { deletions, archives: [], pullRequestHolds: [] };
   // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
   const heldByPullRequests = (thread: OrchestrationV2ThreadShell) =>
     resolveProjectSettings(settings, thread.projectId).settings.sidebarAutoSettleKeepPullRequests
@@ -432,10 +434,10 @@ function planThreadCleanup({
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length === 0),
     ).map(({ thread }) => ({ thread, sideChatsUnchangedSince })),
-    pullRequestsToRefresh: oldestExpired(
+    pullRequestHolds: expired(
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length > 0),
-    ).flatMap((candidate) => candidate.pullRequests),
+    ).map((candidate) => candidate.pullRequests),
   };
 }
 
@@ -2133,6 +2135,7 @@ const make = Effect.gen(function* () {
     return removed;
   });
 
+  let refreshStart = 0;
   const cleanThreads = Effect.fn("StorageCleanup.cleanThreads")(function* (
     serverSettings: ServerSettings,
     now: number,
@@ -2207,9 +2210,16 @@ const make = Effect.gen(function* () {
       );
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
-    yield* Effect.forEach(plan.pullRequestsToRefresh, pullRequestSync.requestSync, {
-      discard: true,
-    });
+    // A refresh that finds a pull request still open leaves its thread's clock alone, so each
+    // sweep moves on to the next held threads instead of asking about the oldest ones again.
+    const holds = plan.pullRequestHolds;
+    const start = holds.length > THREADS_PER_SWEEP ? refreshStart % holds.length : 0;
+    refreshStart = start + THREADS_PER_SWEEP;
+    yield* Effect.forEach(
+      [...holds.slice(start), ...holds.slice(0, start)].slice(0, THREADS_PER_SWEEP).flat(),
+      pullRequestSync.requestSync,
+      { discard: true },
+    );
     const unarchived = threads.filter((thread) => thread.archivedAt === null);
     for (const { thread, sideChatsUnchangedSince } of plan.archives) {
       if (yield* takesScheduledTask(thread, unarchived)) continue;

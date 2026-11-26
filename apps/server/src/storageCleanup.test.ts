@@ -4721,6 +4721,52 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("refreshes a held pull request behind 100 older ones that stay open", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        fixture.setSettings({ sidebarAutoSettleKeepPullRequests: true });
+        fixture.setThreads(
+          Array.from({ length: 101 }, (_, index) =>
+            settled(`held-${index + 1}`, {
+              updatedAt: at(-(132 - index) * DAY_MS),
+              pullRequests: [
+                {
+                  host: "example.test",
+                  repository: "owner/repository",
+                  number: index + 1,
+                  url: `https://example.test/owner/repository/pull/${index + 1}`,
+                  source: "manual",
+                  linkedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                  snapshot: {
+                    state: "open",
+                    title: "Pull request",
+                    headBranch: `feature-${index + 1}`,
+                    baseBranch: "main",
+                    isDraft: false,
+                    updatedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                    syncedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                  },
+                  stack: null,
+                },
+              ],
+            }),
+          ),
+        );
+        yield* firstReport(fixture);
+        expect(fixture.requestedPullRequests()).toHaveLength(100);
+        expect(fixture.requestedPullRequests()).not.toContain(101);
+        yield* fixture.service.runNow;
+        expect(fixture.requestedPullRequests().slice(100)).toContain(101);
+        expect(fixture.dispatched()).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("keeps a settled thread whose task is enabled while the sweep archives others", () =>
     runCleanupTest(
       Effect.gen(function* () {
