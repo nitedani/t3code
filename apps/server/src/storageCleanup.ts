@@ -18,7 +18,6 @@ import type {
   TerminalSummary,
   WorktreeCleanupRules,
   StorageCleanupReport,
-  StorageCleanupThreadEntry,
   ThreadId,
 } from "@t3tools/contracts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -2189,21 +2188,7 @@ const make = Effect.gen(function* () {
     sweptDeletions = deletionsAtStart;
     // After the worktree rules, which a deletion would otherwise hand a tombstone; its
     // thread.deleted requests the sweep that cleans up after it.
-    const threadEntries: StorageCleanupThreadEntry[] = [];
-    yield* retention.retireThreads(now, threadEntries).pipe(
-      Effect.catch((error) =>
-        Effect.gen(function* () {
-          threadEntries.push({
-            outcome: "failed",
-            reason: cleanupFailureReason(error),
-            projectPath: null,
-            threadId: null,
-            threadTitle: null,
-          });
-          yield* Effect.logWarning("thread cleanup failed", { error });
-        }),
-      ),
-    );
+    const threadEntries = yield* retention.retire(now);
     // The sweeps a deletion requests keep the last run's threads until one finds threads of its own.
     const reportedThreads =
       followsDeletions && trigger === "automatic" && threadEntries.length === 0

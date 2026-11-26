@@ -20,7 +20,6 @@ import {
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
-  type StorageCleanupThreadEntry,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -1688,9 +1687,8 @@ it.effect(
         failureReason: (error) => error.message,
       });
       const retire = Effect.gen(function* () {
-        const entries: StorageCleanupThreadEntry[] = [];
         const due = DateTime.toEpochMillis(yield* DateTime.now) + 31 * 86_400_000;
-        yield* retention.retireThreads(due, entries);
+        const entries = yield* retention.retire(due);
         return entries.map((entry) => [entry.threadId, entry.outcome]);
       });
       const archived = Effect.forEach([parentId, sideChatId], (threadId) =>
