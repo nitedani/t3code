@@ -184,7 +184,6 @@ function planThreadCleanup({
   };
 }
 
-/** What retention needs from the storage sweep that runs it. */
 export interface ThreadRetentionSweep<ReadError, TaskReadError> {
   readonly readThreads: Effect.Effect<
     {
