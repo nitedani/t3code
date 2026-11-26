@@ -4721,6 +4721,37 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("removes an inactive worktree of an archived thread the same sweep deletes", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: 10,
+          archivedThreadsAfterDays: 7,
+        });
+        const archived = settled("archived-with-worktree", {
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: at(-8 * DAY_MS),
+        });
+        fixture.setThreads([archived]);
+        fixture.setOnDispatch((command) => {
+          if (command.type === "thread.delete")
+            fixture.setThreads([{ ...archived, deletedAt: at(0) }]);
+        });
+        const report = yield* fixture.service.runNow;
+        expect(report.threads).toMatchObject([
+          { threadId: "archived-with-worktree", outcome: "removed" },
+        ]);
+        expect(report.entries.find((entry) => entry.path === fixture.worktree)).toMatchObject({
+          outcome: "removed",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
+
   it.effect("stops deleting once the rule is switched off or lengthened during the sweep", () =>
     runCleanupTest(
       Effect.gen(function* () {

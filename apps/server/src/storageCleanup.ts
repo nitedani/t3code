@@ -2365,21 +2365,6 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
-    const threadEntries: StorageCleanupThreadEntry[] = [];
-    yield* cleanThreads(serverSettings, now, threadEntries).pipe(
-      Effect.catch((error) =>
-        Effect.gen(function* () {
-          threadEntries.push({
-            outcome: "failed",
-            reason: cleanupFailureReason(error),
-            projectPath: null,
-            threadId: null,
-            threadTitle: null,
-          });
-          yield* Effect.logWarning("thread cleanup failed", { error });
-        }),
-      ),
-    );
     yield* cleanCheckpointRefs().pipe(
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
     );
@@ -2425,6 +2410,23 @@ const make = Effect.gen(function* () {
     deletedWorktreeWaits = deletedWorktrees.waiting;
     keptDeletedWorktrees = deletedWorktrees.kept;
     sweptDeletions = deletionsAtStart;
+    // After the worktree rules, which a deletion would otherwise hand a tombstone; its
+    // thread.deleted requests the sweep that cleans up after it.
+    const threadEntries: StorageCleanupThreadEntry[] = [];
+    yield* cleanThreads(serverSettings, now, threadEntries).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          threadEntries.push({
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            projectPath: null,
+            threadId: null,
+            threadTitle: null,
+          });
+          yield* Effect.logWarning("thread cleanup failed", { error });
+        }),
+      ),
+    );
     for (const category of [
       {
         kind: "browser-artifacts" as const,
