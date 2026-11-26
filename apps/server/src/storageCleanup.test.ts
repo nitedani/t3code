@@ -4721,6 +4721,37 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("keeps a settled thread whose task is enabled while the sweep archives others", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 7,
+        });
+        fixture.setThreads([
+          settled("review-first", { updatedAt: at(-32 * DAY_MS) }),
+          settled("review-second"),
+          settled("review-third"),
+          settled("review-third-side-chat", { lineage: sideChatOf("review-third") }),
+        ]);
+        fixture.setOnDispatch((command) => {
+          if ("threadId" in command && command.threadId === "review-first")
+            fixture.setScheduledThreadIds(["review-second", "review-third-side-chat"]);
+        });
+        const report = yield* firstReport(fixture);
+        expect(
+          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
+        ).toEqual(["review-first"]);
+        expect(report.threads).toMatchObject([
+          { threadId: "review-first", outcome: "removed" },
+          { threadId: "review-second", outcome: "kept", reason: "thread has a scheduled task" },
+          { threadId: "review-third", outcome: "kept", reason: "thread has a scheduled task" },
+        ]);
+      }),
+    ),
+  );
+
   it.effect("is off by default, then archives the 100 oldest threads a sweep", () =>
     runCleanupTest(
       Effect.gen(function* () {

@@ -2182,17 +2182,19 @@ const make = Effect.gen(function* () {
     const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
       return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
     });
-    for (const { thread, archivedAt } of plan.deletions) {
-      // A delete can't be undone, so a task enabled since the plan was read still keeps the thread.
+    // A task enabled since the plan was read still keeps the thread, and so does one in a side chat it takes.
+    const takesScheduledTask = Effect.fnUntraced(function* (
+      thread: OrchestrationV2ThreadShell,
+      cascade: ReadonlyArray<OrchestrationV2ThreadShell>,
+    ) {
       const scheduled = yield* readScheduledThreadIds();
-      if (keptWithSideChats(threads, (candidate) => scheduled.has(candidate.id))(thread)) {
-        entries.push({
-          ...entryFor(thread),
-          outcome: "kept",
-          reason: "thread has a scheduled task",
-        });
-        continue;
-      }
+      if (!keptWithSideChats(cascade, (candidate) => scheduled.has(candidate.id))(thread))
+        return false;
+      entries.push({ ...entryFor(thread), outcome: "kept", reason: "thread has a scheduled task" });
+      return true;
+    });
+    for (const { thread, archivedAt } of plan.deletions) {
+      if (yield* takesScheduledTask(thread, threads)) continue;
       yield* apply(
         thread,
         {
@@ -2208,7 +2210,9 @@ const make = Effect.gen(function* () {
     yield* Effect.forEach(plan.pullRequestsToRefresh, pullRequestSync.requestSync, {
       discard: true,
     });
+    const unarchived = threads.filter((thread) => thread.archivedAt === null);
     for (const { thread, sideChatsUnchangedSince } of plan.archives) {
+      if (yield* takesScheduledTask(thread, unarchived)) continue;
       yield* apply(
         thread,
         {
