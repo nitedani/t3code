@@ -4881,20 +4881,21 @@ describe("settled and archived thread cleanup", () => {
   );
 
   it.effect(
-    "stops archiving or deleting once its rule is switched off or lengthened during the sweep",
+    "archives or deletes the rest of a sweep only as its rule switched off or lengthened during it allows",
     () =>
       runCleanupTest(
         Effect.gen(function* () {
           yield* TestClock.setTime(NOW_MS);
           const fixture = yield* cleanupFixture(DEFAULT_SERVER_SETTINGS.storageCleanup);
           let activated = false;
+          const reasons: Array<string | undefined> = [];
           for (const rule of ["archivedThreadsAfterDays", "settledThreadsAfterDays"] as const) {
             const settings = (days: number | null) => ({
               storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, [rule]: days },
             });
             const archivedAt = (days: number) =>
               rule === "archivedThreadsAfterDays" ? at(-days * DAY_MS) : null;
-            for (const changed of [null, 60]) {
+            for (const changed of [null, 60, 8]) {
               fixture.setSettings(settings(7));
               fixture.setThreads([
                 settled(`first-${rule}-${changed}`, {
@@ -4904,9 +4905,12 @@ describe("settled and archived thread cleanup", () => {
                 settled(`second-${rule}-${changed}`, { archivedAt: archivedAt(8) }),
               ]);
               fixture.setOnDispatch(() => fixture.setSettings(settings(changed)));
-              if (activated) yield* fixture.service.runNow;
-              else yield* firstReport(fixture);
+              const report = activated
+                ? yield* fixture.service.runNow
+                : yield* firstReport(fixture);
               activated = true;
+              if (changed === 8)
+                reasons.push(...(report.threads ?? []).map((entry) => entry.reason));
             }
           }
           expect(
@@ -4916,8 +4920,18 @@ describe("settled and archived thread cleanup", () => {
           ).toEqual([
             "first-archivedThreadsAfterDays-null",
             "first-archivedThreadsAfterDays-60",
+            "first-archivedThreadsAfterDays-8",
+            "second-archivedThreadsAfterDays-8",
             "first-settledThreadsAfterDays-null",
             "first-settledThreadsAfterDays-60",
+            "first-settledThreadsAfterDays-8",
+            "second-settledThreadsAfterDays-8",
+          ]);
+          expect(reasons).toEqual([
+            "Deleted after 7 days archived",
+            "Deleted after 8 days archived",
+            "Archived after 7 days settled",
+            "Archived after 8 days settled",
           ]);
         }),
       ),

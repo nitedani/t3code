@@ -22,27 +22,6 @@ const DAY_MS = 86_400_000;
 // At most this many threads per rule per sweep. Each deletion requests another sweep,
 // so a deletion backlog drains faster than the hourly tick.
 const THREADS_PER_SWEEP = 100;
-const SCHEDULED_TASK_HOLD = "thread has a scheduled task";
-
-/** Whether both settings make the same threads due for archive and delete. */
-export function sameRetentionRules(left: ServerSettings, right: ServerSettings): boolean {
-  return (
-    left.storageCleanup.settledThreadsAfterDays === right.storageCleanup.settledThreadsAfterDays &&
-    left.storageCleanup.archivedThreadsAfterDays ===
-      right.storageCleanup.archivedThreadsAfterDays &&
-    left.sidebarAutoSettleKeepPullRequests === right.sidebarAutoSettleKeepPullRequests &&
-    [
-      ...new Set([
-        ...Object.keys(left.projectSettingsOverrides),
-        ...Object.keys(right.projectSettingsOverrides),
-      ]),
-    ].every(
-      (projectId) =>
-        left.projectSettingsOverrides[projectId as ProjectId]?.sidebarAutoSettleKeepPullRequests ===
-        right.projectSettingsOverrides[projectId as ProjectId]?.sidebarAutoSettleKeepPullRequests,
-    )
-  );
-}
 
 type Rule = "archive" | "delete";
 
@@ -50,8 +29,8 @@ type Rule = "archive" | "delete";
 type Family = readonly [OrchestrationV2ThreadShell, ...ReadonlyArray<OrchestrationV2ThreadShell>];
 
 // A verdict reads a family's shells, whose every change it depends on moves updatedAt for the
-// orchestrator's ifUnchanged to refuse, and these facts, which no shell carries. pullRequests
-// is the exception: a merge or reopen is seen on the next sweep.
+// orchestrator's ifUnchanged to refuse, and these facts, which no shell carries and which are read
+// again before each action. pullRequests is the exception: a merge or reopen waits for the next sweep.
 interface Facts {
   readonly settings: ServerSettings;
   readonly scheduledThreadIds: ReadonlySet<string>;
@@ -128,10 +107,14 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
   const random = yield* SecureRandom.SecureRandom;
   const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
-  // A side chat waiting on delegated tasks has a finished turn, so its shell reads idle.
-  const readDelegatingThreadIds = projections
-    .listDelegatingThreadIds()
-    .pipe(Effect.map((threadIds) => new Set<string>(threadIds)));
+  const readFacts = Effect.all({
+    settings: settingsService.getSettings,
+    scheduledThreadIds: sweep.readScheduledThreadIds,
+    // A side chat waiting on delegated tasks has a finished turn, so its shell reads idle.
+    delegatingThreadIds: projections
+      .listDelegatingThreadIds()
+      .pipe(Effect.map((threadIds) => new Set<string>(threadIds))),
+  });
 
   /** Why this member keeps its whole family where it is, or null. */
   const holdOf = (thread: OrchestrationV2ThreadShell, facts: Facts, now: number) => {
@@ -140,7 +123,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
     // A guest is waiting on the owner; archiving would drop the request.
     if ((thread.pendingGuestMessageCount ?? 0) > 0) return "a guest is waiting";
     // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
-    if (facts.scheduledThreadIds.has(thread.id)) return SCHEDULED_TASK_HOLD;
+    if (facts.scheduledThreadIds.has(thread.id)) return "thread has a scheduled task";
     // Pinning or snoozing a thread keeps it in view, archived or not.
     if (thread.pinnedAt != null) return "thread is pinned";
     if (isSnoozed(thread, now)) return "thread is snoozed";
@@ -221,34 +204,29 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
     now: number,
     entries: StorageCleanupThreadEntry[],
   ) {
-    const serverSettings = yield* settingsService.getSettings;
-    const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
-    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
+    const { storageCleanup } = yield* settingsService.getSettings;
+    if (
+      storageCleanup.settledThreadsAfterDays === null &&
+      storageCleanup.archivedThreadsAfterDays === null
+    )
+      return;
     const { projects, threads } = yield* sweep.readThreads;
-    const facts: Facts = {
-      settings: serverSettings,
-      scheduledThreadIds: yield* sweep.readScheduledThreadIds,
-      delegatingThreadIds: yield* readDelegatingThreadIds,
-    };
-    const { deletions, archives, pullRequestHolds } = plan(threads, facts, now);
+    const { deletions, archives, pullRequestHolds } = plan(threads, yield* readFacts, now);
     const entryFor = (thread: OrchestrationV2ThreadShell) => ({
       projectPath:
         projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
       threadId: thread.id,
       threadTitle: thread.title,
     });
-    // The only dispatch: it checks again what can change outside the thread since the plan read it.
+    // The only dispatch: it asks the plan's verdict again on facts read just now.
     const act = Effect.fnUntraced(function* (rule: Rule, family: Family) {
       const [thread] = family;
-      // A rule changed since the plan stops the rest of the batch; the change sweeps again.
-      if (!sameRetentionRules(yield* settingsService.getSettings, serverSettings)) return "stopped";
-      // A task enabled since the plan was read still keeps the family.
-      const scheduledThreadIds = yield* sweep.readScheduledThreadIds;
-      if (family.some((member) => scheduledThreadIds.has(member.id))) {
-        entries.push({ ...entryFor(thread), outcome: "kept", reason: SCHEDULED_TASK_HOLD });
-        return "kept";
-      }
-      const days = ruleDays(rule, serverSettings);
+      const facts = yield* readFacts;
+      const judged = verdict(rule, family, facts, now);
+      if (judged.type === "held")
+        entries.push({ ...entryFor(thread), outcome: "kept", reason: judged.reason });
+      if (judged.type !== "due") return;
+      const days = ruleDays(rule, facts.settings);
       const command = {
         type: rule === "delete" ? ("thread.delete" as const) : ("thread.archive" as const),
         commandId: CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`),
@@ -277,11 +255,8 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
         ),
       );
       entries.push({ ...entryFor(thread), ...result });
-      return result.outcome;
     });
-    for (const family of deletions) {
-      if ((yield* act("delete", family)) === "stopped") break;
-    }
+    for (const family of deletions) yield* act("delete", family);
     // A settled thread's links are read only on request, so a merge or close would go unseen.
     // A refresh that finds a pull request still open leaves its thread's clock alone, so each
     // sweep moves on to the next held threads instead of asking about the oldest ones again.
@@ -295,9 +270,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
       pullRequestSync.requestSync,
       { discard: true },
     );
-    for (const family of archives) {
-      if ((yield* act("archive", family)) === "stopped") break;
-    }
+    for (const family of archives) yield* act("archive", family);
   });
 
   /** Archives and deletes the threads the retention rules make due, one report entry each. */
