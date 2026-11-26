@@ -454,6 +454,7 @@ const cleanupFixture = (
           ),
         getThreadShell: (threadId: ThreadId) =>
           Effect.sync(() => threads.find((thread) => thread.id === threadId) ?? null),
+        listDelegatingThreadIds: () => Effect.succeed([]),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(ThreadManagement.ThreadManagementService, {
         getShellSnapshot: (input?: { threadIds?: ReadonlyArray<ThreadId> }) =>

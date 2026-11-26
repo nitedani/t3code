@@ -43,7 +43,6 @@ import type {
   OrchestrationV2ProviderTurn,
   OrchestrationV2Run,
   OrchestrationV2RuntimeRequest,
-  OrchestrationV2Subagent,
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2ShellThreadStatus,
   OrchestrationV2ThreadShell,
@@ -57,7 +56,9 @@ import type {
 import {
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
+  isOrchestrationV2WorkActive,
   isQueuedProviderThreadPlaceholder,
+  OrchestrationV2Subagent,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -584,6 +585,11 @@ export interface ProjectionStoreV2Shape {
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  /** Threads with an app-owned task whose child thread is still at work. */
+  readonly listDelegatingThreadIds: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionStoreV2Error
+  >;
   readonly hasPendingDelegatedCompletion: (
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
@@ -6839,6 +6845,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => [...new Set(rows.map((row) => ThreadId.make(row.child_thread_id)))]),
         Effect.mapError(controlReadError(threadId)),
       );
+    const listDelegatingThreadIds: ProjectionStoreV2Shape["listDelegatingThreadIds"] = () =>
+      sql<{ readonly thread_id: string }>`SELECT DISTINCT thread_id
+        FROM orchestration_v2_projection_subagents
+        WHERE origin = 'app_owned' AND child_thread_id IS NOT NULL
+          AND status IN (SELECT value FROM json_each(${encodeIdList(
+            OrchestrationV2Subagent.fields.status.literals.filter(isOrchestrationV2WorkActive),
+          )}))`.pipe(
+        Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))),
+        Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+      );
     const hasPendingDelegatedCompletion: ProjectionStoreV2Shape["hasPendingDelegatedCompletion"] =
       Effect.fn("ProjectionStore.hasPendingDelegatedCompletion")((childThreadId) =>
         sql`SELECT 1 FROM orchestration_v2_projection_subagents AS task
@@ -10038,6 +10054,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getSubagentCount: readOnReader(getSubagentCount),
       getRunCount: readOnReader(getRunCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),
+      listDelegatingThreadIds: readOnReader(listDelegatingThreadIds),
       hasPendingDelegatedCompletion: readOnReader(hasPendingDelegatedCompletion),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),

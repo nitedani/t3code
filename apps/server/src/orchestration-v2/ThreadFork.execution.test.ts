@@ -34,6 +34,7 @@ import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
@@ -1598,6 +1599,7 @@ const retentionLayer = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([forkCases[0]!.adapter]),
     { databaseLayer: retentionDatabase, runEffectWorker: false },
   ),
+  ProjectionStore.layer.pipe(Layer.provide(retentionDatabase)),
   Layer.mock(Settings.ServerSettingsService)({
     getSettings: Effect.succeed({
       ...DEFAULT_SERVER_SETTINGS,

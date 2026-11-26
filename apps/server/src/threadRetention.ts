@@ -6,14 +6,13 @@ import type {
   StorageCleanupThreadEntry,
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import { isSnoozed } from "./orchestration-v2/ThreadSettlementService.ts";
 import * as Settings from "./serverSettings.ts";
@@ -128,16 +127,11 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
   const settingsService = yield* Settings.ServerSettingsService;
   const random = yield* SecureRandom.SecureRandom;
   const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
-  const sql = yield* SqlClient.SqlClient;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
   // A side chat waiting on delegated tasks has a finished turn, so its shell reads idle.
-  const readDelegatingThreadIds = sql<{ readonly threadId: string }>`
-    SELECT DISTINCT thread_id AS "threadId" FROM orchestration_v2_projection_subagents
-    WHERE origin = 'app_owned' AND child_thread_id IS NOT NULL
-      AND status IN ('pending', 'running', 'waiting')
-  `.pipe(
-    NodeSqliteClient.readOnly,
-    Effect.map((rows) => new Set(rows.map((row) => row.threadId))),
-  );
+  const readDelegatingThreadIds = projections
+    .listDelegatingThreadIds()
+    .pipe(Effect.map((threadIds) => new Set<string>(threadIds)));
 
   /** Why this member keeps its whole family where it is, or null. */
   const holdOf = (thread: OrchestrationV2ThreadShell, facts: Facts, now: number) => {
