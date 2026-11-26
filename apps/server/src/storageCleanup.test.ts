@@ -4579,6 +4579,8 @@ describe("settled and archived thread cleanup", () => {
           // Marking a woken thread unread clears the snooze and keeps updatedAt.
           settled("settled-woken-then-unread", { lastSnoozeWakeAt: at(-60 * 60 * 1_000) }),
           settled("settled-running", { status: "running" }),
+          // A guest message sent before its link expired still waits for an answer.
+          settled("settled-guest-waiting", { pendingGuestMessageCount: 1 }),
           settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
           openPullRequest,
           settled("settled-dismissed-open", {

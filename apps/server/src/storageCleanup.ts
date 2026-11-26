@@ -366,7 +366,10 @@ function planThreadCleanup({
   const idle = threads.filter(
     (thread) =>
       // Side chats follow their parent; subagent threads are not cleaned.
-      isListedThreadLineage(thread.lineage) && threadIdle(thread, now, settings),
+      isListedThreadLineage(thread.lineage) &&
+      threadIdle(thread, now, settings) &&
+      // A guest is waiting on the owner; archiving would drop the request.
+      (thread.pendingGuestMessageCount ?? 0) === 0,
   );
   const keep = (thread: OrchestrationV2ThreadShell) =>
     // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
