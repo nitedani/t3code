@@ -344,6 +344,26 @@ it("turns a thread rule on only where every selected machine grants task operati
   expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
 });
 
+it("switches a thread rule off that only a machine shown second has on", async () => {
+  setup();
+  state.operable = ["env-a"];
+  state.targets = [null, 7].map((archivedThreadsAfterDays, index) => ({
+    environmentId: ["env-a", "env-b"][index]!,
+    settings: {
+      ...state.settings,
+      storageCleanup: { ...state.settings.storageCleanup, archivedThreadsAfterDays },
+    },
+  }));
+  state.settings = state.targets[0]!.settings;
+  await using screen = await render(panel());
+  const deleteRule = screen.getByRole("switch", { name: "Delete archived threads" });
+  await expect.element(deleteRule).toBeEnabled();
+  await expect.element(deleteRule).toBeChecked();
+  await expect.element(screen.getByLabelText("Delete archived threads in days")).toBeDisabled();
+  await userEvent.click(deleteRule);
+  expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
+});
+
 it.each([
   [rule, "browserArtifactsAfterDays"],
   ["Archive settled threads", "settledThreadsAfterDays"],

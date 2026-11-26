@@ -949,6 +949,12 @@ function StorageRetentionRow({
     requiredScopesForServerSettingsPatch({ storageCleanup: { [setting]: 1 } }).includes(
       AuthOrchestrationOperateScope,
     ) && !targets.every((target) => operable.has(target.environmentId));
+  // Switching off needs no task operation, so it reaches a rule that is on anywhere selected.
+  const shownValue =
+    offOnly && value === null
+      ? (targets.find((target) => target.settings.storageCleanup[setting] !== null)?.settings
+          .storageCleanup[setting] ?? null)
+      : value;
   return (
     <AnimatedHeight>
       <SettingsRow
@@ -964,7 +970,7 @@ function StorageRetentionRow({
         control={
           <RetentionControl
             label={title}
-            value={value}
+            value={shownValue}
             offOnly={offOnly}
             onChange={(days, onFailed) =>
               updateSettings({ storageCleanup: { [setting]: days } }, { onFailed })
