@@ -3,7 +3,12 @@ import type {
   StorageCleanupSettings,
   WorktreeCleanupRules,
 } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  requiredScopesForServerSettingsPatch,
+} from "@t3tools/contracts";
 import { resolvePastedPath } from "@t3tools/shared/path";
+import { useEnvironmentsWithScope } from "../../state/session";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { useRef, useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
@@ -120,11 +125,14 @@ function RetentionControl({
   value,
   onChange,
   minimum = 1,
+  offOnly = false,
 }: {
   label: string;
   value: number | null;
   onChange: (value: number | null, onFailed: () => void) => void;
   minimum?: number;
+  /** Allows only switching the rule off. */
+  offOnly?: boolean;
 }) {
   const gt = useGT();
   const [draft, setDraft] = useState(value);
@@ -184,6 +192,7 @@ function RetentionControl({
     >
       {on ? (
         <NumberField
+          disabled={offOnly}
           value={draft}
           min={minimum}
           max={3650}
@@ -253,6 +262,7 @@ function RetentionControl({
       <Switch
         aria-label={label}
         checked={on}
+        disabled={offOnly && !on}
         // Keeps focus in the age field, so switching off never commits an edited age first.
         onMouseDown={(event) => event.preventDefault()}
         onCheckedChange={(enabled) => {
@@ -934,6 +944,11 @@ function StorageRetentionRow({
     targets.length > 1 &&
     targets.some((target) => target.settings.storageCleanup[setting] !== value);
   const settledStatus = useDebouncedValue(`${targetIdsKey}:${mixed}`, 300);
+  const operable = useEnvironmentsWithScope(targets, AuthOrchestrationOperateScope);
+  const offOnly =
+    requiredScopesForServerSettingsPatch({ storageCleanup: { [setting]: 1 } }).includes(
+      AuthOrchestrationOperateScope,
+    ) && !targets.every((target) => operable.has(target.environmentId));
   return (
     <AnimatedHeight>
       <SettingsRow
@@ -950,6 +965,7 @@ function StorageRetentionRow({
           <RetentionControl
             label={title}
             value={value}
+            offOnly={offOnly}
             onChange={(days, onFailed) =>
               updateSettings({ storageCleanup: { [setting]: days } }, { onFailed })
             }

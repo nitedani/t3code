@@ -13,6 +13,12 @@ const state = vi.hoisted(() => ({
   run: vi.fn(),
   update: vi.fn(),
   report: null as StorageCleanupReport | null,
+  operable: [] as string[],
+}));
+
+vi.mock(import("../../state/session"), async (original) => ({
+  ...(await original()),
+  useEnvironmentsWithScope: (() => new Set(state.operable)) as never,
 }));
 
 vi.mock(import("../../state/server"), async (original) => {
@@ -121,6 +127,7 @@ function setup() {
     settings: state.settings,
   }));
   state.report = null;
+  state.operable = ["env-a", "env-b"];
   state.run.mockReset();
   state.update.mockReset();
 }
@@ -288,6 +295,26 @@ const withSavedAge = (days: number) => {
     storageCleanup: { ...state.settings.storageCleanup, browserArtifactsAfterDays: days },
   };
 };
+
+it("turns a thread rule on only where every selected machine grants task operation", async () => {
+  setup();
+  state.operable = ["env-a"];
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, archivedThreadsAfterDays: 7 },
+  };
+  await using screen = await render(panel());
+  await expect
+    .element(screen.getByRole("switch", { name: "Archive settled threads" }))
+    .toBeDisabled();
+  await expect.element(ruleSwitch(screen)).toBeEnabled();
+  // A rule that is on can still be switched off.
+  const deleteRule = screen.getByRole("switch", { name: "Delete archived threads" });
+  await expect.element(deleteRule).toBeEnabled();
+  await expect.element(screen.getByLabelText("Delete archived threads in days")).toBeDisabled();
+  await userEvent.click(deleteRule);
+  expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
+});
 
 it("saves a newly enabled retention rule only once its age is committed", async () => {
   setup();

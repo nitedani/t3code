@@ -2088,6 +2088,14 @@ function carriesProjectScripts(patch: ServerSettingsPatch): boolean {
   );
 }
 
+/** With a thread retention rule on, the host archives and deletes threads with no one asking. */
+function setsThreadRetention(patch: ServerSettingsPatch): boolean {
+  return (
+    patch.storageCleanup?.settledThreadsAfterDays != null ||
+    patch.storageCleanup?.archivedThreadsAfterDays != null
+  );
+}
+
 export function requiredScopesForServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ReadonlyArray<AuthEnvironmentScope> {
@@ -2120,8 +2128,11 @@ export function requiredScopesForServerSettingsPatch(
     ...(changesSettings || (!changesProviders && !changesAccess) ? [AuthSettingsWriteScope] : []),
     ...(changesProviders ? [AuthProvidersManageScope] : []),
     ...(changesAccess ? [AuthAccessWriteScope] : []),
-    // Saving a script is choosing a command for the host to run, wherever the patch carries it.
-    ...(carriesProjectScripts(patch) ? [AuthOrchestrationOperateScope] : []),
+    // Saving a script or a thread retention age chooses what the host does with no one asking,
+    // wherever the patch carries it.
+    ...(carriesProjectScripts(patch) || setsThreadRetention(patch)
+      ? [AuthOrchestrationOperateScope]
+      : []),
   ];
 }
 
