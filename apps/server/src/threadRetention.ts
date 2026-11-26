@@ -1,6 +1,5 @@
 import { CommandId, isListedThreadLineage } from "@t3tools/contracts";
 import type {
-  OrchestrationV2ServerCommand,
   OrchestrationV2ThreadShell,
   ProjectId,
   ServerSettings,
@@ -191,10 +190,10 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
   let refreshStart = 0;
   /** Archives and deletes the threads the retention rules make due, and reports whether it deleted any. */
   const retireThreads = Effect.fn("ThreadRetention.retireThreads")(function* (
-    serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupThreadEntry[],
   ) {
+    const serverSettings = yield* settingsService.getSettings;
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
     if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return false;
     const { projects, threads } = yield* sweep.readThreads;
@@ -210,11 +209,42 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       threadId: thread.id,
       threadTitle: thread.title,
     });
-    const apply = Effect.fnUntraced(function* (
-      thread: OrchestrationV2ThreadShell,
-      command: OrchestrationV2ServerCommand,
-      reason: string,
+    // The only dispatch: it checks again what can change outside the thread since the plan read it.
+    const act = Effect.fnUntraced(function* (
+      type: "thread.archive" | "thread.delete",
+      {
+        thread,
+        family,
+      }: {
+        readonly thread: OrchestrationV2ThreadShell;
+        readonly family: ReadonlyArray<OrchestrationV2ThreadShell>;
+      },
     ) {
+      const rule =
+        type === "thread.delete" ? "archivedThreadsAfterDays" : "settledThreadsAfterDays";
+      const days = serverSettings.storageCleanup[rule];
+      // A rule changed since the plan stops the rest of its batch; the change sweeps again.
+      if ((yield* settingsService.getSettings).storageCleanup[rule] !== days) return "stopped";
+      // A task enabled since the plan was read still keeps the family.
+      const held = familyHold(family, {
+        ...hold,
+        scheduledThreadIds: yield* sweep.readScheduledThreadIds,
+      });
+      if (held !== null) {
+        entries.push({ ...entryFor(thread), outcome: "kept", reason: held });
+        return "kept";
+      }
+      const reason =
+        type === "thread.delete"
+          ? `Deleted after ${days} days archived`
+          : `Archived after ${days} days settled`;
+      const command = {
+        type,
+        commandId: CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`),
+        threadId: thread.id,
+        // The orchestrator takes the family only if no member changed since this read.
+        ifUnchanged: family.map((member) => ({ threadId: member.id, updatedAt: member.updatedAt })),
+      };
       const result = yield* engine.dispatch(command).pipe(
         Effect.as({ outcome: "removed" as const, reason }),
         // The orchestrator refused the command, usually because the thread changed after this sweep read it.
@@ -232,41 +262,10 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       entries.push({ ...entryFor(thread), ...result });
       return result.outcome;
     });
-    const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
-      return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
-    });
-    // A task enabled since the plan was read still keeps the family.
-    const heldSincePlan = Effect.fnUntraced(function* (
-      thread: OrchestrationV2ThreadShell,
-      family: ReadonlyArray<OrchestrationV2ThreadShell>,
-    ) {
-      const reason = familyHold(family, {
-        ...hold,
-        scheduledThreadIds: yield* sweep.readScheduledThreadIds,
-      });
-      if (reason === null) return false;
-      entries.push({ ...entryFor(thread), outcome: "kept", reason });
-      return true;
-    });
     let deleted = false;
-    // The orchestrator takes the family only if no member changed since this read.
-    const asRead = (family: ReadonlyArray<OrchestrationV2ThreadShell>) =>
-      family.map((member) => ({ threadId: member.id, updatedAt: member.updatedAt }));
-    for (const { thread, family } of plan.deletions) {
-      if (yield* heldSincePlan(thread, family)) continue;
-      // A delete can't be undone, so a rule changed since the plan stops it; the change sweeps again.
-      const { storageCleanup } = yield* settingsService.getSettings;
-      if (storageCleanup.archivedThreadsAfterDays !== archivedThreadsAfterDays) break;
-      const outcome = yield* apply(
-        thread,
-        {
-          type: "thread.delete",
-          commandId: yield* commandId(thread),
-          threadId: thread.id,
-          ifUnchanged: asRead(family),
-        },
-        `Deleted after ${archivedThreadsAfterDays} days archived`,
-      );
+    for (const deletion of plan.deletions) {
+      const outcome = yield* act("thread.delete", deletion);
+      if (outcome === "stopped") break;
       if (outcome === "removed") deleted = true;
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
@@ -280,18 +279,8 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       pullRequestSync.requestSync,
       { discard: true },
     );
-    for (const { thread, family } of plan.archives) {
-      if (yield* heldSincePlan(thread, family)) continue;
-      yield* apply(
-        thread,
-        {
-          type: "thread.archive",
-          commandId: yield* commandId(thread),
-          threadId: thread.id,
-          ifUnchanged: asRead(family),
-        },
-        `Archived after ${settledThreadsAfterDays} days settled`,
-      );
+    for (const archive of plan.archives) {
+      if ((yield* act("thread.archive", archive)) === "stopped") break;
     }
     return deleted;
   });

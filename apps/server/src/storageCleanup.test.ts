@@ -4816,29 +4816,47 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
-  it.effect("stops deleting once the rule is switched off or lengthened during the sweep", () =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(NOW_MS);
-        const rule = (archivedThreadsAfterDays: number | null) => ({
-          storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, archivedThreadsAfterDays },
-        });
-        const fixture = yield* cleanupFixture(rule(7).storageCleanup);
-        for (const changed of [null, 30]) {
-          fixture.setSettings(rule(7));
-          fixture.setThreads([
-            settled(`first-${changed}`, { archivedAt: at(-9 * DAY_MS) }),
-            settled(`second-${changed}`, { archivedAt: at(-8 * DAY_MS) }),
+  it.effect(
+    "stops archiving or deleting once its rule is switched off or lengthened during the sweep",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(NOW_MS);
+          const fixture = yield* cleanupFixture(DEFAULT_SERVER_SETTINGS.storageCleanup);
+          let activated = false;
+          for (const rule of ["archivedThreadsAfterDays", "settledThreadsAfterDays"] as const) {
+            const settings = (days: number | null) => ({
+              storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, [rule]: days },
+            });
+            const archivedAt = (days: number) =>
+              rule === "archivedThreadsAfterDays" ? at(-days * DAY_MS) : null;
+            for (const changed of [null, 60]) {
+              fixture.setSettings(settings(7));
+              fixture.setThreads([
+                settled(`first-${rule}-${changed}`, {
+                  updatedAt: at(-32 * DAY_MS),
+                  archivedAt: archivedAt(9),
+                }),
+                settled(`second-${rule}-${changed}`, { archivedAt: archivedAt(8) }),
+              ]);
+              fixture.setOnDispatch(() => fixture.setSettings(settings(changed)));
+              if (activated) yield* fixture.service.runNow;
+              else yield* firstReport(fixture);
+              activated = true;
+            }
+          }
+          expect(
+            fixture
+              .dispatched()
+              .map((command) => ("threadId" in command ? command.threadId : null)),
+          ).toEqual([
+            "first-archivedThreadsAfterDays-null",
+            "first-archivedThreadsAfterDays-60",
+            "first-settledThreadsAfterDays-null",
+            "first-settledThreadsAfterDays-60",
           ]);
-          fixture.setOnDispatch(() => fixture.setSettings(rule(changed)));
-          if (changed === null) yield* firstReport(fixture);
-          else yield* fixture.service.runNow;
-        }
-        expect(
-          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
-        ).toEqual(["first-null", "first-30"]);
-      }),
-    ),
+        }),
+      ),
   );
 
   it.effect("refreshes a held pull request behind 100 older ones that stay open", () =>

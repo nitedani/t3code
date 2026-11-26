@@ -2191,7 +2191,7 @@ const make = Effect.gen(function* () {
     // After the worktree rules, which a deletion would otherwise hand a tombstone; its
     // thread.deleted requests the sweep that cleans up after it.
     const threadEntries: StorageCleanupThreadEntry[] = [];
-    const deletedThreads = yield* retention.retireThreads(serverSettings, now, threadEntries).pipe(
+    const deletedThreads = yield* retention.retireThreads(now, threadEntries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           threadEntries.push({
