@@ -13036,5 +13036,6 @@
   "40eb4974d8282a55": "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
   "7a240a7dc1cf6ac3": "Delete archived threads",
   "a16843c5733a43bc": "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
-  "b32e50d8961787d5": "automatic archive settled threads delete archived threads old cleanup retention days"
+  "b32e50d8961787d5": "automatic archive settled threads delete archived threads old cleanup retention days",
+  "b5a1e4e019c79374": "Update the selected environments to clean up settled and archived threads, or choose a machine that supports it."
 }

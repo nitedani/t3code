@@ -13022,5 +13022,6 @@
   "40eb4974d8282a55": "Archiva un hilo resuelto tras este número de días sin cambios. Desarchivarlo lo recupera.",
   "7a240a7dc1cf6ac3": "Eliminar hilos archivados",
   "a16843c5733a43bc": "Elimina un hilo tras este número de días en el archivo, incluidos los que archivaste tú. No se puede deshacer.",
-  "b32e50d8961787d5": "archivar automáticamente hilos resueltos eliminar hilos archivados antiguos limpieza retención días"
+  "b32e50d8961787d5": "archivar automáticamente hilos resueltos eliminar hilos archivados antiguos limpieza retención días",
+  "b5a1e4e019c79374": "Actualiza los entornos seleccionados para limpiar los hilos resueltos y archivados, o elige una máquina que lo admita."
 }

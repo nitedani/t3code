@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   update: vi.fn(),
   report: null as StorageCleanupReport | null,
   operable: [] as string[],
+  threadRetention: [] as string[],
 }));
 
 vi.mock(import("../../state/session"), async (original) => ({
@@ -58,6 +59,7 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
           capabilities: {
             storageCleanup: true,
             storageCleanupRun: true,
+            threadRetention: state.threadRetention.includes(environmentId),
             settledWorktreeCleanup: true,
           },
         },
@@ -100,6 +102,17 @@ vi.mock(import("./settingsLayout"), async (original) => ({
   ),
   SettingResetButton: (() => null) as never,
 }));
+// The notice's machine menu needs the router; this keeps its text and the machines it offers.
+vi.mock(import("./SettingsScopeNotice"), async (original) => ({
+  ...(await original()),
+  SettingsScopeNotice: (({
+    children,
+    eligibleEnvironmentIds,
+  }: {
+    children: ReactNode;
+    eligibleEnvironmentIds?: readonly string[];
+  }) => <p data-eligible={eligibleEnvironmentIds?.join(" ")}>{children}</p>) as never,
+}));
 vi.mock(import("../ui/toast"), async (original) => {
   const actual = await original();
   return { ...actual, toastManager: { ...actual.toastManager, add: vi.fn() } };
@@ -133,6 +146,7 @@ function setup() {
   }));
   state.report = null;
   state.operable = ["env-a", "env-b"];
+  state.threadRetention = ["env-a", "env-b"];
   state.run.mockReset();
   state.update.mockReset();
 }
@@ -342,6 +356,22 @@ it("turns a thread rule on only where every selected machine grants task operati
   await expect.element(screen.getByLabelText("Delete archived threads in days")).toBeDisabled();
   await userEvent.click(deleteRule);
   expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
+});
+
+it("offers thread rules only where every selected machine supports them", async () => {
+  setup();
+  state.threadRetention = ["env-a"];
+  await using screen = await render(panel());
+  await expect
+    .element(
+      screen.getByText(
+        "Update the selected environments to clean up settled and archived threads, or choose a machine that supports it.",
+      ),
+    )
+    .toHaveAttribute("data-eligible", "env-a");
+  await expect.element(screen.getByRole("switch", { name: rule })).toBeEnabled();
+  expect(screen.container.textContent).not.toContain("Archive settled threads");
+  expect(screen.container.textContent).not.toContain("Delete archived threads");
 });
 
 it("switches a thread rule off that only a machine shown second has on", async () => {

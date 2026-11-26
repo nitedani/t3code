@@ -1006,6 +1006,9 @@ export function StorageCleanupSections() {
     );
   }
 
+  const threadRetentionEnvironments = connectedEnvironments.filter(
+    (environment) => environment.serverConfig?.environment.capabilities.threadRetention === true,
+  );
   // Machines report their databases after the page renders, so the notice goes last to push nothing down.
   return (
     <>
@@ -1025,22 +1028,42 @@ export function StorageCleanupSections() {
           )}
         />
       </SettingsSection>
-      <SettingsSection id="storage-threads" title={gt("Settled and archived threads")}>
-        <StorageRetentionRow
-          setting="settledThreadsAfterDays"
-          title={gt("Archive settled threads")}
-          description={gt(
-            "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
-          )}
-        />
-        <StorageRetentionRow
-          setting="archivedThreadsAfterDays"
-          title={gt("Delete archived threads")}
-          description={gt(
-            "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
-          )}
-        />
-      </SettingsSection>
+      {threadRetentionEnvironments.length < connectedEnvironments.length ? (
+        <SettingsSection
+          id="storage-threads"
+          title={gt("Settled and archived threads")}
+          variant="plain"
+        >
+          <SettingsScopeNotice
+            inline
+            target="environment"
+            eligibleEnvironmentIds={threadRetentionEnvironments.map(
+              (environment) => environment.environmentId,
+            )}
+          >
+            {gt(
+              "Update the selected environments to clean up settled and archived threads, or choose a machine that supports it.",
+            )}
+          </SettingsScopeNotice>
+        </SettingsSection>
+      ) : (
+        <SettingsSection id="storage-threads" title={gt("Settled and archived threads")}>
+          <StorageRetentionRow
+            setting="settledThreadsAfterDays"
+            title={gt("Archive settled threads")}
+            description={gt(
+              "Archive a settled thread after this many days without changes. Unarchiving brings it back.",
+            )}
+          />
+          <StorageRetentionRow
+            setting="archivedThreadsAfterDays"
+            title={gt("Delete archived threads")}
+            description={gt(
+              "Delete a thread after this many days in the archive, including threads you archived yourself. This can't be undone.",
+            )}
+          />
+        </SettingsSection>
+      )}
       <CleanupSection />
       {databaseStorageNotice}
     </>

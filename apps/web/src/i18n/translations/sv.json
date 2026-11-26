@@ -13034,5 +13034,6 @@
   "40eb4974d8282a55": "Arkivera en klar tråd efter så här många dagar utan ändringar. Avarkivera den för att få tillbaka den.",
   "7a240a7dc1cf6ac3": "Ta bort arkiverade trådar",
   "a16843c5733a43bc": "Ta bort en tråd efter så här många dagar i arkivet, även trådar du själv har arkiverat. Det går inte att ångra.",
-  "b32e50d8961787d5": "automatiskt arkivera klara trådar ta bort arkiverade trådar gamla rensning lagring dagar"
+  "b32e50d8961787d5": "automatiskt arkivera klara trådar ta bort arkiverade trådar gamla rensning lagring dagar",
+  "b5a1e4e019c79374": "Uppdatera de valda miljöerna för att rensa klara och arkiverade trådar, eller välj en dator som stöder det."
 }
