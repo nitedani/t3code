@@ -1,9 +1,11 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
   NodeId,
@@ -18,10 +20,12 @@ import {
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
+  type StorageCleanupThreadEntry,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Statement from "effect/sql/Statement";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -33,6 +37,10 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Settings from "../serverSettings.ts";
+import { makeThreadRetention } from "../threadRetention.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const forkCases = (
@@ -60,7 +68,7 @@ const forkCases = (
     { runEffectWorker: false },
   );
 
-  return { driver, status, instanceId, modelSelection, layer };
+  return { driver, status, instanceId, modelSelection, adapter, layer };
 });
 
 it.effect("a persisted fork leaves PR watching with its parent until explicitly opted in", () =>
@@ -1573,6 +1581,138 @@ it.effect("a guarded archive or delete takes a family only as its caller read it
     assert.isNotNull((yield* thread(parentId)).deletedAt);
     assert.isNotNull((yield* thread(sideChatId)).deletedAt);
   }).pipe(Effect.provide(forkCases[0]!.layer)),
+);
+
+const retentionDatabase = SqlitePersistence.layerMemory;
+const retentionLayer = Layer.mergeAll(
+  retentionDatabase,
+  NodeCrypto.layer,
+  ProviderReplayHarness.layerWithRegistry(
+    { name: "retention-delegating-side-chat" },
+    ProviderAdapterRegistry.layerFromAdapters([forkCases[0]!.adapter]),
+    { databaseLayer: retentionDatabase, runEffectWorker: false },
+  ),
+  Layer.mock(Settings.ServerSettingsService)({
+    getSettings: Effect.succeed({
+      ...DEFAULT_SERVER_SETTINGS,
+      storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, settledThreadsAfterDays: 30 },
+    }),
+  }),
+  Layer.mock(PullRequestSyncReactor.PullRequestSyncReactor)({ requestSync: () => Effect.void }),
+);
+
+it.effect(
+  "thread retention keeps a settled family while a side chat waits on delegated tasks",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const { driver, instanceId } = forkCases[0]!;
+      const parentId = ThreadId.make("retention-delegating-parent");
+      const sideChatId = ThreadId.make("retention-delegating-side-chat");
+      yield* createParent(parentId);
+      yield* writeParentRun({
+        threadId: parentId,
+        runId: RunId.make("retention-delegating-parent-run"),
+        ordinal: 1,
+        status: "completed",
+        text: "Parent work",
+        stable: true,
+      });
+      yield* forkSideChat("retention-delegating-fork", parentId, sideChatId);
+      const sideChatRunId = RunId.make("retention-delegating-side-chat-run");
+      yield* writeParentRun({
+        threadId: sideChatId,
+        runId: sideChatRunId,
+        ordinal: 1,
+        status: "completed",
+        text: "Delegate a review",
+      });
+      const taskId = NodeId.make("retention-delegating-task");
+      const task = (status: "running" | "completed") =>
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`${taskId}:${status}`),
+                type: "subagent.updated",
+                threadId: sideChatId,
+                occurredAt: now,
+                payload: {
+                  id: taskId,
+                  threadId: sideChatId,
+                  runId: sideChatRunId,
+                  parentNodeId: NodeId.make("retention-delegating-node"),
+                  origin: "app_owned",
+                  createdBy: "agent",
+                  driver,
+                  providerInstanceId: instanceId,
+                  providerThreadId: null,
+                  childThreadId: ThreadId.make("retention-delegating-child"),
+                  nativeTaskRef: null,
+                  prompt: "Review the changes",
+                  title: null,
+                  model: null,
+                  status,
+                  result: null,
+                  startedAt: now,
+                  completedAt: status === "running" ? null : now,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+        });
+      yield* task("running");
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("retention-delegating-settle"),
+        threadId: parentId,
+      });
+      const shells = orchestrator
+        .getShellSnapshot()
+        .pipe(Effect.map(({ threads, archivedThreads }) => [...threads, ...archivedThreads]));
+      const retention = yield* makeThreadRetention({
+        readThreads: shells.pipe(Effect.map((threads) => ({ projects: [], threads }))),
+        readScheduledThreadIds: Effect.succeed(new Set()),
+        // The side chat's turn finished, so its shell reads idle.
+        threadIdle: () => true,
+        failureReason: (error) => error.message,
+      });
+      const retire = Effect.gen(function* () {
+        const entries: StorageCleanupThreadEntry[] = [];
+        const due = DateTime.toEpochMillis(yield* DateTime.now) + 31 * 86_400_000;
+        yield* retention.retireThreads(due, entries);
+        return entries.map((entry) => [entry.threadId, entry.outcome]);
+      });
+      const archived = Effect.forEach([parentId, sideChatId], (threadId) =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(Effect.map(({ thread }) => thread.archivedAt !== null)),
+      );
+
+      assert.deepStrictEqual(yield* retire, []);
+      assert.deepStrictEqual(yield* archived, [false, false]);
+      const guarded = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("retention-delegating-guarded-archive"),
+          threadId: parentId,
+          ifUnchanged: (yield* shells).flatMap((thread) =>
+            thread.id === parentId || thread.id === sideChatId
+              ? [{ threadId: thread.id, updatedAt: thread.updatedAt }]
+              : [],
+          ),
+        })
+        .pipe(Effect.flip);
+      assert.include(String(guarded.cause), "has running delegated tasks");
+      assert.deepStrictEqual(yield* archived, [false, false]);
+
+      yield* task("completed");
+      assert.deepStrictEqual(yield* retire, [[parentId, "removed"]]);
+      assert.deepStrictEqual(yield* archived, [true, true]);
+    }).pipe(Effect.provide(retentionLayer)),
 );
 
 it.effect("a side chat opened during the parent's first turn starts from a digest", () =>

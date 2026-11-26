@@ -5,10 +5,12 @@ import type {
   ServerSettings,
   StorageCleanupThreadEntry,
 } from "@t3tools/contracts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
@@ -24,15 +26,16 @@ const THREADS_PER_SWEEP = 100;
 interface HoldContext {
   readonly now: number;
   readonly scheduledThreadIds: ReadonlySet<string>;
+  readonly delegatingThreadIds: ReadonlySet<string>;
   readonly threadIdle: (thread: OrchestrationV2ThreadShell) => boolean;
 }
 
 /** Why this thread keeps its whole family where it is, or null. */
 function holdOf(
   thread: OrchestrationV2ThreadShell,
-  { now, scheduledThreadIds, threadIdle }: HoldContext,
+  { now, scheduledThreadIds, delegatingThreadIds, threadIdle }: HoldContext,
 ) {
-  if (!threadIdle(thread)) return "thread is working";
+  if (!threadIdle(thread) || delegatingThreadIds.has(thread.id)) return "thread is working";
   // A guest is waiting on the owner; archiving would drop the request.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return "a guest is waiting";
   // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
@@ -186,6 +189,16 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
   const settingsService = yield* Settings.ServerSettingsService;
   const random = yield* SecureRandom.SecureRandom;
   const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
+  const sql = yield* SqlClient.SqlClient;
+  // A side chat waiting on delegated tasks has a finished turn, so its shell reads idle.
+  const readDelegatingThreadIds = sql<{ readonly threadId: string }>`
+    SELECT DISTINCT thread_id AS "threadId" FROM orchestration_v2_projection_subagents
+    WHERE origin = 'app_owned' AND child_thread_id IS NOT NULL
+      AND status IN ('pending', 'running', 'waiting')
+  `.pipe(
+    NodeSqliteClient.readOnly,
+    Effect.map((rows) => new Set(rows.map((row) => row.threadId))),
+  );
 
   let refreshStart = 0;
   /** Archives and deletes the threads the retention rules make due, and reports whether it deleted any. */
@@ -200,6 +213,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
     const hold: HoldContext = {
       now,
       scheduledThreadIds: yield* sweep.readScheduledThreadIds,
+      delegatingThreadIds: yield* readDelegatingThreadIds,
       threadIdle: (thread) => sweep.threadIdle(thread, now, serverSettings),
     };
     const plan = planThreadCleanup({ threads, settings: serverSettings, hold });
