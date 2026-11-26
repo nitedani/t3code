@@ -1,9 +1,12 @@
 import { act, fakeTimers, render, type Screen } from "../../../test/render";
 import { RegistryProvider } from "@effect/atom-react";
 import { DEFAULT_SERVER_SETTINGS, type StorageCleanupReport } from "@t3tools/contracts";
+import { getTranslationsSnapshot, GTProvider } from "gt-react";
 import { createContext, type ReactNode, useContext } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
+
+import { initializeI18n } from "~/i18n/initializeI18n";
 
 import "~/index.css";
 
@@ -106,6 +109,8 @@ import { toastManager } from "../ui/toast";
 import { StorageCleanupSections } from "./StorageSettings";
 
 function setup() {
+  // GTProvider leaves its locale in a cookie; this sets it back to English.
+  initializeI18n(() => {});
   state.settings = {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
@@ -295,6 +300,29 @@ const withSavedAge = (days: number) => {
     storageCleanup: { ...state.settings.storageCleanup, browserArtifactsAfterDays: days },
   };
 };
+
+it.each([
+  { locale: "en", one: "day", other: "days" },
+  { locale: "de", one: "Tag", other: "Tage" },
+])(
+  "labels retention ages of 1 and 8 as $one and $other in $locale",
+  async ({ locale, one, other }) => {
+    setup();
+    setRetentionValues([1], [8]);
+    const translations = await getTranslationsSnapshot(locale);
+    await using screen = await render(
+      <GTProvider locale={locale} translations={translations}>
+        {panel()}
+      </GTProvider>,
+    );
+
+    const unitBesideAge = (age: string) =>
+      Array.from(screen.container.querySelectorAll("input")).find((input) => input.value === age)
+        ?.nextElementSibling?.textContent;
+    await expect.poll(() => unitBesideAge("1")).toBe(one);
+    expect(unitBesideAge("8")).toBe(other);
+  },
+);
 
 it("turns a thread rule on only where every selected machine grants task operation", async () => {
   setup();
