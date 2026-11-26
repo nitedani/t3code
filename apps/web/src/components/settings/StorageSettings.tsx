@@ -537,14 +537,14 @@ function CleanupSection() {
         .map(async (environment) => {
           const result = await run({ environmentId: environment.environmentId, input: {} });
           if (result._tag === "Success") {
-            const failures = cleanupEntries(result.value).filter(
-              (entry) => entry.outcome === "failed",
-            );
-            if (failures.length > 0)
+            const failure =
+              result.value.threads?.find((entry) => entry.outcome === "failed") ??
+              result.value.entries.find((entry) => entry.outcome === "failed");
+            if (failure !== undefined)
               toastManager.add({
                 type: "error",
                 title: gt("Cleanup failed on {label}", { label: environment.label }),
-                description: failures[0]!.reason,
+                description: failure.reason,
               });
           } else if (!isAtomCommandInterrupted(result)) {
             toastManager.add({
