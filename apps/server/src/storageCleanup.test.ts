@@ -4859,6 +4859,55 @@ describe("settled and archived thread cleanup", () => {
       ),
   );
 
+  it.effect.each([
+    { sidebarAutoSettleKeepPullRequests: true },
+    {
+      projectSettingsOverrides: {
+        [ProjectId.make("project-1")]: { sidebarAutoSettleKeepPullRequests: true },
+      },
+    },
+  ])("stops archiving once threads with a pull request are kept during the sweep", (keep) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        fixture.setThreads([
+          settled("review-first", { updatedAt: at(-32 * DAY_MS) }),
+          settled("review-linked", {
+            pullRequests: [
+              {
+                host: "example.test",
+                repository: "owner/repository",
+                number: 1,
+                url: "https://example.test/owner/repository/pull/1",
+                source: "manual",
+                linkedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                snapshot: {
+                  state: "open",
+                  title: "Pull request",
+                  headBranch: "feature",
+                  baseBranch: "main",
+                  isDraft: false,
+                  updatedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                  syncedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                },
+                stack: null,
+              },
+            ],
+          }),
+        ]);
+        fixture.setOnDispatch(() => fixture.setSettings(keep));
+        yield* firstReport(fixture);
+        expect(
+          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
+        ).toEqual(["review-first"]);
+      }),
+    ),
+  );
+
   it.effect("refreshes a held pull request behind 100 older ones that stay open", () =>
     runCleanupTest(
       Effect.gen(function* () {

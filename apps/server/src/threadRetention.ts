@@ -22,6 +22,27 @@ const DAY_MS = 86_400_000;
 // At most this many threads per rule per sweep. Each deletion requests another sweep,
 // so a deletion backlog drains faster than the hourly tick.
 const THREADS_PER_SWEEP = 100;
+const SCHEDULED_TASK_HOLD = "thread has a scheduled task";
+
+/** Whether both settings make the same threads due for archive and delete. */
+export function sameRetentionRules(left: ServerSettings, right: ServerSettings): boolean {
+  return (
+    left.storageCleanup.settledThreadsAfterDays === right.storageCleanup.settledThreadsAfterDays &&
+    left.storageCleanup.archivedThreadsAfterDays ===
+      right.storageCleanup.archivedThreadsAfterDays &&
+    left.sidebarAutoSettleKeepPullRequests === right.sidebarAutoSettleKeepPullRequests &&
+    [
+      ...new Set([
+        ...Object.keys(left.projectSettingsOverrides),
+        ...Object.keys(right.projectSettingsOverrides),
+      ]),
+    ].every(
+      (projectId) =>
+        left.projectSettingsOverrides[projectId as ProjectId]?.sidebarAutoSettleKeepPullRequests ===
+        right.projectSettingsOverrides[projectId as ProjectId]?.sidebarAutoSettleKeepPullRequests,
+    )
+  );
+}
 
 interface HoldContext {
   readonly now: number;
@@ -39,7 +60,7 @@ function holdOf(
   // A guest is waiting on the owner; archiving would drop the request.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return "a guest is waiting";
   // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
-  if (scheduledThreadIds.has(thread.id)) return "thread has a scheduled task";
+  if (scheduledThreadIds.has(thread.id)) return SCHEDULED_TASK_HOLD;
   // Pinning or snoozing a thread keeps it in view, archived or not.
   if (thread.pinnedAt != null) return "thread is pinned";
   if (isSnoozed(thread, now)) return "thread is snoozed";
@@ -234,20 +255,18 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
         readonly family: ReadonlyArray<OrchestrationV2ThreadShell>;
       },
     ) {
-      const rule =
-        type === "thread.delete" ? "archivedThreadsAfterDays" : "settledThreadsAfterDays";
-      const days = serverSettings.storageCleanup[rule];
-      // A rule changed since the plan stops the rest of its batch; the change sweeps again.
-      if ((yield* settingsService.getSettings).storageCleanup[rule] !== days) return "stopped";
+      // A rule changed since the plan stops the rest of the batch; the change sweeps again.
+      if (!sameRetentionRules(yield* settingsService.getSettings, serverSettings)) return "stopped";
       // A task enabled since the plan was read still keeps the family.
-      const held = familyHold(family, {
-        ...hold,
-        scheduledThreadIds: yield* sweep.readScheduledThreadIds,
-      });
-      if (held !== null) {
-        entries.push({ ...entryFor(thread), outcome: "kept", reason: held });
+      const scheduledThreadIds = yield* sweep.readScheduledThreadIds;
+      if (family.some((member) => scheduledThreadIds.has(member.id))) {
+        entries.push({ ...entryFor(thread), outcome: "kept", reason: SCHEDULED_TASK_HOLD });
         return "kept";
       }
+      const days =
+        serverSettings.storageCleanup[
+          type === "thread.delete" ? "archivedThreadsAfterDays" : "settledThreadsAfterDays"
+        ];
       const reason =
         type === "thread.delete"
           ? `Deleted after ${days} days archived`

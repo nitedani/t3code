@@ -58,7 +58,7 @@ import * as WorktreeBranchSync from "./orchestration-v2/WorktreeBranchSync.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
-import { makeThreadRetention } from "./threadRetention.ts";
+import { makeThreadRetention, sameRetentionRules } from "./threadRetention.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as CheckpointCaptureIndex from "./vcs/checkpointCaptureIndex.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -2344,7 +2344,8 @@ const make = Effect.gen(function* () {
         if (
           Equal.equals(settings.storageCleanup, lastSettings.storageCleanup) &&
           Equal.equals(settings.worktreeCleanup, lastSettings.worktreeCleanup) &&
-          sameProjectWorktreePolicies(settings, lastSettings)
+          sameProjectWorktreePolicies(settings, lastSettings) &&
+          sameRetentionRules(settings, lastSettings)
         )
           return Effect.void;
         lastSettings = settings;
