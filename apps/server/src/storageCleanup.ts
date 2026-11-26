@@ -2198,6 +2198,9 @@ const make = Effect.gen(function* () {
     });
     for (const { thread, archivedAt } of plan.deletions) {
       if (yield* takesScheduledTask(thread, threads)) continue;
+      // A delete can't be undone, so a rule changed since the plan stops it; the change sweeps again.
+      const { storageCleanup } = yield* settingsService.getSettings;
+      if (storageCleanup.archivedThreadsAfterDays !== archivedThreadsAfterDays) break;
       yield* apply(
         thread,
         {

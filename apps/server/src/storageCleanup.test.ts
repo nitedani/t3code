@@ -4721,6 +4721,31 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("stops deleting once the rule is switched off or lengthened during the sweep", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const rule = (archivedThreadsAfterDays: number | null) => ({
+          storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, archivedThreadsAfterDays },
+        });
+        const fixture = yield* cleanupFixture(rule(7).storageCleanup);
+        for (const changed of [null, 30]) {
+          fixture.setSettings(rule(7));
+          fixture.setThreads([
+            settled(`first-${changed}`, { archivedAt: at(-9 * DAY_MS) }),
+            settled(`second-${changed}`, { archivedAt: at(-8 * DAY_MS) }),
+          ]);
+          fixture.setOnDispatch(() => fixture.setSettings(rule(changed)));
+          if (changed === null) yield* firstReport(fixture);
+          else yield* fixture.service.runNow;
+        }
+        expect(
+          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
+        ).toEqual(["first-null", "first-30"]);
+      }),
+    ),
+  );
+
   it.effect("refreshes a held pull request behind 100 older ones that stay open", () =>
     runCleanupTest(
       Effect.gen(function* () {
