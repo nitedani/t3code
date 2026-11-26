@@ -4625,6 +4625,20 @@ describe("settled and archived thread cleanup", () => {
             snoozedAt: at(-9 * DAY_MS),
             snoozedUntil: at(DAY_MS),
           }),
+          settled("settled-recent-side-chat-parent"),
+          settled("settled-recent-side-chat", {
+            lineage: sideChatOf("settled-recent-side-chat-parent"),
+            updatedAt: at(-DAY_MS),
+          }),
+          settled("settled-working-side-chat-parent"),
+          settled("settled-working-side-chat", {
+            lineage: sideChatOf("settled-working-side-chat-parent"),
+            status: "running",
+          }),
+          settled("archived-unarchived-side-chat-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-unarchived-side-chat", {
+            lineage: sideChatOf("archived-unarchived-side-chat-parent"),
+          }),
         ]);
         fixture.setScheduledThreadIds([
           "settled-scheduled",
@@ -4639,13 +4653,15 @@ describe("settled and archived thread cleanup", () => {
           {
             type: "thread.delete",
             threadId: "archived-expired",
-            expectedArchivedAt: at(-8 * DAY_MS),
+            ifUnchanged: [
+              { threadId: "archived-expired", updatedAt: at(-31 * DAY_MS) },
+              { threadId: "archived-expired-side-chat", updatedAt: at(-31 * DAY_MS) },
+            ],
           },
           {
             type: "thread.archive",
             threadId: "settled-dismissed-open",
-            expectedUpdatedAt: at(-31 * DAY_MS),
-            sideChatsUnchangedSince: at(-30 * DAY_MS),
+            ifUnchanged: [{ threadId: "settled-dismissed-open", updatedAt: at(-31 * DAY_MS) }],
           },
         ]);
         expect(report.threads).toMatchObject([

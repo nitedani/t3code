@@ -45,6 +45,7 @@ function holdOf(
 }
 
 const SIDE_CHAT_HOLDS: ReadonlySet<string> = new Set([
+  "thread is working",
   "thread has a scheduled task",
   "thread is pinned",
   "thread is snoozed",
@@ -62,7 +63,7 @@ function familyHold(family: ReadonlyArray<OrchestrationV2ThreadShell>, context: 
 /**
  * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list,
  * each with the family it takes, and the open pull requests of every expired thread they hold, oldest first.
- * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
+ * A settled family's shelf clock is the latest updatedAt or past snooze ending of a member it takes;
  * unarchiving counts as a change.
  */
 function planThreadCleanup({
@@ -112,15 +113,10 @@ function planThreadCleanup({
           listed.flatMap((thread) => {
             if (thread.archivedAt === null) return [];
             const family = deletionFamily(thread);
-            return familyHold(family, hold) === null
-              ? [
-                  {
-                    thread,
-                    family,
-                    archivedAt: thread.archivedAt,
-                    sinceMs: DateTime.toEpochMillis(thread.archivedAt),
-                  },
-                ]
+            // A side chat brought back from the archive is in use.
+            return family.every((member) => member.archivedAt !== null) &&
+              familyHold(family, hold) === null
+              ? [{ thread, family, sinceMs: DateTime.toEpochMillis(thread.archivedAt) }]
               : [];
           }),
         );
@@ -153,19 +149,18 @@ function planThreadCleanup({
           {
             thread,
             family,
-            sinceMs: shelfClockMs(thread),
+            sinceMs: Math.max(...family.map(shelfClockMs)),
             pullRequests: heldByPullRequests(thread),
           },
         ]
       : [];
   });
-  const sideChatsUnchangedSince = DateTime.makeUnsafe(now - settledThreadsAfterDays * DAY_MS);
   return {
     deletions,
     archives: oldestExpired(
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length === 0),
-    ).map(({ thread, family }) => ({ thread, family, sideChatsUnchangedSince })),
+    ),
     pullRequestHolds: expired(
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length > 0),
@@ -261,7 +256,10 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       return true;
     });
     let deleted = false;
-    for (const { thread, family, archivedAt } of plan.deletions) {
+    // The orchestrator takes the family only if no member changed since this read.
+    const asRead = (family: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+      family.map((member) => ({ threadId: member.id, updatedAt: member.updatedAt }));
+    for (const { thread, family } of plan.deletions) {
       if (yield* heldSincePlan(thread, family)) continue;
       // A delete can't be undone, so a rule changed since the plan stops it; the change sweeps again.
       const { storageCleanup } = yield* settingsService.getSettings;
@@ -272,7 +270,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
           type: "thread.delete",
           commandId: yield* commandId(thread),
           threadId: thread.id,
-          expectedArchivedAt: archivedAt,
+          ifUnchanged: asRead(family),
         },
         `Deleted after ${archivedThreadsAfterDays} days archived`,
       );
@@ -289,7 +287,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       pullRequestSync.requestSync,
       { discard: true },
     );
-    for (const { thread, family, sideChatsUnchangedSince } of plan.archives) {
+    for (const { thread, family } of plan.archives) {
       if (yield* heldSincePlan(thread, family)) continue;
       yield* apply(
         thread,
@@ -297,8 +295,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
           type: "thread.archive",
           commandId: yield* commandId(thread),
           threadId: thread.id,
-          expectedUpdatedAt: thread.updatedAt,
-          sideChatsUnchangedSince,
+          ifUnchanged: asRead(family),
         },
         `Archived after ${settledThreadsAfterDays} days settled`,
       );
