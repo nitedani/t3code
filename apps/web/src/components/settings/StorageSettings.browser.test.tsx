@@ -316,18 +316,24 @@ it("turns a thread rule on only where every selected machine grants task operati
   expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
 });
 
-it("saves a newly enabled retention rule only once its age is committed", async () => {
+it.each([
+  [rule, "browserArtifactsAfterDays"],
+  ["Archive settled threads", "settledThreadsAfterDays"],
+  ["Delete archived threads", "archivedThreadsAfterDays"],
+])("saves a newly enabled %s rule only once its age is committed", async (title, setting) => {
   setup();
   await using screen = await render(panel());
-  await userEvent.click(ruleSwitch(screen));
+  const toggle = screen.getByRole("switch", { name: title });
+  await userEvent.click(toggle);
   expect(state.update).not.toHaveBeenCalled();
-  await expect.element(ruleSwitch(screen)).toBeChecked();
-  await expect.element(daysInput(screen)).toHaveFocus();
+  await expect.element(toggle).toBeChecked();
+  const days = screen.getByLabelText(`${title} in days`);
+  await expect.element(days).toHaveFocus();
 
-  await userEvent.fill(daysInput(screen), "30");
+  await userEvent.fill(days, "30");
   await userEvent.keyboard("{Enter}");
-  expect(saves()).toEqual([{ browserArtifactsAfterDays: 30 }]);
-  await expect.element(ruleSwitch(screen)).toBeChecked();
+  expect(saves()).toEqual([{ [setting]: 30 }]);
+  await expect.element(toggle).toBeChecked();
 });
 
 it("discards a retention draft on Escape, on leaving it untouched, or when switched back off", async () => {
