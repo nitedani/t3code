@@ -4830,6 +4830,55 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("keeps the archived threads in the report of the sweep a delete by hand requests", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        const due = settled("settled-expired");
+        fixture.setThreads([due]);
+        fixture.setOnDispatch(() => fixture.setThreads([{ ...due, archivedAt: at(0) }]));
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        const first = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* fixture.activate(Stream.fromQueue(events));
+        yield* Fiber.join(first);
+        yield* fixture.service.drain;
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "settled-expired", outcome: "removed" },
+        ]);
+        const followUp = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.drop(1),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const byHand = settled("deleted-by-hand");
+        Queue.offerUnsafe(events, {
+          id: EventId.make("event:delete-by-hand"),
+          type: "thread.deleted",
+          threadId: byHand.id,
+          occurredAt: at(0),
+          payload: { ...byHand, deletedAt: at(0), lastVisitedAt: null },
+        } as OrchestrationV2DomainEvent);
+        yield* Fiber.join(followUp);
+        yield* fixture.service.drain;
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.archive"]);
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "settled-expired", outcome: "removed" },
+        ]);
+      }),
+    ),
+  );
+
   it.effect(
     "stops archiving or deleting once its rule is switched off or lengthened during the sweep",
     () =>

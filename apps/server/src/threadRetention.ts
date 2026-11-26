@@ -221,14 +221,14 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
   );
 
   let refreshStart = 0;
-  /** Archives and deletes the threads the retention rules make due, and reports whether it deleted any. */
+  /** Archives and deletes the threads the retention rules make due. */
   const retireThreads = Effect.fn("ThreadRetention.retireThreads")(function* (
     now: number,
     entries: StorageCleanupThreadEntry[],
   ) {
     const serverSettings = yield* settingsService.getSettings;
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
-    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return false;
+    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
     const { projects, threads } = yield* sweep.readThreads;
     const hold: HoldContext = {
       now,
@@ -294,11 +294,8 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       entries.push({ ...entryFor(thread), ...result });
       return result.outcome;
     });
-    let deleted = false;
     for (const deletion of plan.deletions) {
-      const outcome = yield* act("thread.delete", deletion);
-      if (outcome === "stopped") break;
-      if (outcome === "removed") deleted = true;
+      if ((yield* act("thread.delete", deletion)) === "stopped") break;
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
     // A refresh that finds a pull request still open leaves its thread's clock alone, so each
@@ -314,7 +311,6 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
     for (const archive of plan.archives) {
       if ((yield* act("thread.archive", archive)) === "stopped") break;
     }
-    return deleted;
   });
   return { retireThreads };
 });

@@ -2133,7 +2133,6 @@ const make = Effect.gen(function* () {
   let keptDeletedWorktrees: ReadonlyArray<string> = [];
   let deletions = 0;
   let sweptDeletions = 0;
-  let threadsFromDeletion: ReadonlyArray<StorageCleanupThreadEntry> = [];
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
   ) {
@@ -2191,7 +2190,7 @@ const make = Effect.gen(function* () {
     // After the worktree rules, which a deletion would otherwise hand a tombstone; its
     // thread.deleted requests the sweep that cleans up after it.
     const threadEntries: StorageCleanupThreadEntry[] = [];
-    const deletedThreads = yield* retention.retireThreads(now, threadEntries).pipe(
+    yield* retention.retireThreads(now, threadEntries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           threadEntries.push({
@@ -2202,15 +2201,14 @@ const make = Effect.gen(function* () {
             threadTitle: null,
           });
           yield* Effect.logWarning("thread cleanup failed", { error });
-          return false;
         }),
       ),
     );
-    // The sweeps a deletion requests keep showing the threads it deleted until one finds threads of its own.
-    const followsThreadDeletion =
-      !deletedThreads && followsDeletions && trigger === "automatic" && threadEntries.length === 0;
-    const reportedThreads = followsThreadDeletion ? threadsFromDeletion : threadEntries;
-    threadsFromDeletion = deletedThreads || followsThreadDeletion ? reportedThreads : [];
+    // The sweeps a deletion requests keep the last run's threads until one finds threads of its own.
+    const reportedThreads =
+      followsDeletions && trigger === "automatic" && threadEntries.length === 0
+        ? ((yield* SubscriptionRef.get(reportRef))?.threads ?? [])
+        : threadEntries;
     for (const category of [
       {
         kind: "browser-artifacts" as const,
