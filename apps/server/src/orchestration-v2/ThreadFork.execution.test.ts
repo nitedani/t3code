@@ -1496,9 +1496,16 @@ it.effect("a guarded archive or delete takes a family only as its caller read it
       orchestrator
         .getThreadProjection(threadId)
         .pipe(Effect.map((projection) => projection.thread));
+    // Built from the shell snapshot, the read thread retention builds its token from.
     const asRead = (...threadIds: ReadonlyArray<ThreadId>) =>
-      Effect.forEach(threadIds, (threadId) =>
-        thread(threadId).pipe(Effect.map(({ updatedAt }) => ({ threadId, updatedAt }))),
+      orchestrator.getShellSnapshot().pipe(
+        Effect.map(({ threads, archivedThreads }) =>
+          threadIds.map((threadId) => ({
+            threadId,
+            updatedAt: [...threads, ...archivedThreads].find((shell) => shell.id === threadId)!
+              .updatedAt,
+          })),
+        ),
       );
     const guarded = (
       type: "thread.archive" | "thread.delete",
