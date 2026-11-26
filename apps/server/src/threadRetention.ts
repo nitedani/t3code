@@ -22,37 +22,59 @@ const DAY_MS = 86_400_000;
 // so a deletion backlog drains faster than the hourly tick.
 const THREADS_PER_SWEEP = 100;
 
-// A parent's archive or delete takes its side chats among `threads`, so a kept side chat keeps the parent.
-function keptWithSideChats(
-  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
-  kept: (thread: OrchestrationV2ThreadShell) => boolean,
+interface HoldContext {
+  readonly now: number;
+  readonly scheduledThreadIds: ReadonlySet<string>;
+  readonly threadIdle: (thread: OrchestrationV2ThreadShell) => boolean;
+}
+
+/** Why this thread keeps its whole family where it is, or null. */
+function holdOf(
+  thread: OrchestrationV2ThreadShell,
+  { now, scheduledThreadIds, threadIdle }: HoldContext,
 ) {
-  const parentsOfKept = new Set(
-    threads.flatMap((thread) =>
-      thread.lineage.sideChat === true && kept(thread) ? [thread.lineage.parentThreadId] : [],
-    ),
-  );
-  return (thread: OrchestrationV2ThreadShell) => kept(thread) || parentsOfKept.has(thread.id);
+  if (!threadIdle(thread)) return "thread is working";
+  // A guest is waiting on the owner; archiving would drop the request.
+  if ((thread.pendingGuestMessageCount ?? 0) > 0) return "a guest is waiting";
+  // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
+  if (scheduledThreadIds.has(thread.id)) return "thread has a scheduled task";
+  // Pinning or snoozing a thread keeps it in view, archived or not.
+  if (thread.pinnedAt != null) return "thread is pinned";
+  if (isSnoozed(thread, now)) return "thread is snoozed";
+  return null;
+}
+
+const SIDE_CHAT_HOLDS: ReadonlySet<string> = new Set([
+  "thread has a scheduled task",
+  "thread is pinned",
+  "thread is snoozed",
+]);
+
+/** A family is a listed thread followed by the side chats its archive or delete takes with it. */
+function familyHold(family: ReadonlyArray<OrchestrationV2ThreadShell>, context: HoldContext) {
+  for (const [index, member] of family.entries()) {
+    const hold = holdOf(member, context);
+    if (hold !== null && (index === 0 || SIDE_CHAT_HOLDS.has(hold))) return hold;
+  }
+  return null;
 }
 
 /**
  * The threads one sweep deletes and archives, oldest first, at most THREADS_PER_SWEEP per list,
- * and the open pull requests of every expired thread they hold, oldest first. A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
+ * each with the family it takes, and the open pull requests of every expired thread they hold, oldest first.
+ * A settled thread's shelf clock is its updatedAt or a past snooze ending, whichever is later;
  * unarchiving counts as a change.
  */
 function planThreadCleanup({
   threads,
-  scheduledThreadIds,
   settings,
-  now,
-  threadIdle,
+  hold,
 }: {
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
-  readonly scheduledThreadIds: ReadonlySet<string>;
   readonly settings: ServerSettings;
-  readonly now: number;
-  readonly threadIdle: (thread: OrchestrationV2ThreadShell) => boolean;
+  readonly hold: HoldContext;
 }) {
+  const { now } = hold;
   const { settledThreadsAfterDays, archivedThreadsAfterDays } = settings.storageCleanup;
   const expired = <Candidate extends { readonly sinceMs: number }>(
     days: number,
@@ -65,42 +87,42 @@ function planThreadCleanup({
     days: number,
     candidates: ReadonlyArray<Candidate>,
   ) => expired(days, candidates).slice(0, THREADS_PER_SWEEP);
-  const idle = threads.filter(
-    (thread) =>
-      // Side chats follow their parent; subagent threads are not cleaned.
-      isListedThreadLineage(thread.lineage) &&
-      threadIdle(thread) &&
-      // A guest is waiting on the owner; archiving would drop the request.
-      (thread.pendingGuestMessageCount ?? 0) === 0,
-  );
-  const keep = (thread: OrchestrationV2ThreadShell) =>
-    // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
-    scheduledThreadIds.has(thread.id) ||
-    // Pinning or snoozing a thread keeps it in view, archived or not.
-    thread.pinnedAt != null ||
-    isSnoozed(thread, now);
+  const sideChats = new Map<string | null, Array<OrchestrationV2ThreadShell>>();
+  for (const thread of threads) {
+    if (thread.lineage.sideChat !== true) continue;
+    const siblings = sideChats.get(thread.lineage.parentThreadId) ?? [];
+    sideChats.set(thread.lineage.parentThreadId, [...siblings, thread]);
+  }
+  // Side chats follow their parent; subagent threads are not cleaned.
+  const listed = threads.filter((thread) => isListedThreadLineage(thread.lineage));
   // Deleting a parent takes all its side chats; archiving it takes the unarchived ones.
-  const keptFromDeletion = keptWithSideChats(threads, keep);
-  const keptFromArchive = keptWithSideChats(
-    threads.filter((thread) => thread.archivedAt === null),
-    keep,
-  );
+  const deletionFamily = (thread: OrchestrationV2ThreadShell) => [
+    thread,
+    ...(sideChats.get(thread.id) ?? []),
+  ];
+  const archiveFamily = (thread: OrchestrationV2ThreadShell) => [
+    thread,
+    ...(sideChats.get(thread.id) ?? []).filter((sideChat) => sideChat.archivedAt === null),
+  ];
   const deletions =
     archivedThreadsAfterDays === null
       ? []
       : oldestExpired(
           archivedThreadsAfterDays,
-          idle.flatMap((thread) =>
-            thread.archivedAt === null || keptFromDeletion(thread)
-              ? []
-              : [
+          listed.flatMap((thread) => {
+            if (thread.archivedAt === null) return [];
+            const family = deletionFamily(thread);
+            return familyHold(family, hold) === null
+              ? [
                   {
                     thread,
+                    family,
                     archivedAt: thread.archivedAt,
                     sinceMs: DateTime.toEpochMillis(thread.archivedAt),
                   },
-                ],
-          ),
+                ]
+              : [];
+          }),
         );
   if (settledThreadsAfterDays === null) return { deletions, archives: [], pullRequestHolds: [] };
   // A project that keeps pull requests keeps a settled thread while a pull request it shows is open.
@@ -118,21 +140,32 @@ function planThreadCleanup({
         .map(DateTime.toEpochMillis)
         .filter((ms) => ms <= now),
     );
-  const shelf = idle.flatMap((thread) =>
-    thread.archivedAt === null &&
-    thread.settledOverride === "settled" &&
-    thread.settledAt !== null &&
-    !keptFromArchive(thread)
-      ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
-      : [],
-  );
+  const shelf = listed.flatMap((thread) => {
+    if (
+      thread.archivedAt !== null ||
+      thread.settledOverride !== "settled" ||
+      thread.settledAt === null
+    )
+      return [];
+    const family = archiveFamily(thread);
+    return familyHold(family, hold) === null
+      ? [
+          {
+            thread,
+            family,
+            sinceMs: shelfClockMs(thread),
+            pullRequests: heldByPullRequests(thread),
+          },
+        ]
+      : [];
+  });
   const sideChatsUnchangedSince = DateTime.makeUnsafe(now - settledThreadsAfterDays * DAY_MS);
   return {
     deletions,
     archives: oldestExpired(
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length === 0),
-    ).map(({ thread }) => ({ thread, sideChatsUnchangedSince })),
+    ).map(({ thread, family }) => ({ thread, family, sideChatsUnchangedSince })),
     pullRequestHolds: expired(
       settledThreadsAfterDays,
       shelf.filter((candidate) => candidate.pullRequests.length > 0),
@@ -177,13 +210,12 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
     if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return false;
     const { projects, threads } = yield* sweep.readThreads;
-    const plan = planThreadCleanup({
-      threads,
-      scheduledThreadIds: yield* sweep.readScheduledThreadIds,
-      settings: serverSettings,
+    const hold: HoldContext = {
       now,
+      scheduledThreadIds: yield* sweep.readScheduledThreadIds,
       threadIdle: (thread) => sweep.threadIdle(thread, now, serverSettings),
-    });
+    };
+    const plan = planThreadCleanup({ threads, settings: serverSettings, hold });
     const entryFor = (thread: OrchestrationV2ThreadShell) => ({
       projectPath:
         projects.find((project) => project.id === thread.projectId)?.workspaceRoot ?? null,
@@ -195,52 +227,46 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       command: OrchestrationV2ServerCommand,
       reason: string,
     ) {
-      const entry = entryFor(thread);
-      yield* engine.dispatch(command).pipe(
-        Effect.map(() => entries.push({ ...entry, outcome: "removed", reason })),
+      const result = yield* engine.dispatch(command).pipe(
+        Effect.as({ outcome: "removed" as const, reason }),
         // The orchestrator refused the command, usually because the thread changed after this sweep read it.
         Effect.catchTags({
           OrchestratorDispatchError: (error) =>
-            Effect.sync(() =>
-              entries.push({
-                ...entry,
-                outcome: "kept",
-                reason: typeof error.cause === "string" ? error.cause : error.message,
-              }),
-            ),
+            Effect.succeed({
+              outcome: "kept" as const,
+              reason: typeof error.cause === "string" ? error.cause : error.message,
+            }),
         }),
         Effect.catch((error) =>
-          Effect.sync(() =>
-            entries.push({ ...entry, outcome: "failed", reason: sweep.failureReason(error) }),
-          ),
+          Effect.succeed({ outcome: "failed" as const, reason: sweep.failureReason(error) }),
         ),
       );
+      entries.push({ ...entryFor(thread), ...result });
+      return result.outcome;
     });
     const commandId = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
       return CommandId.make(`server:storage-cleanup:${thread.id}:${yield* random.uuidV4()}`);
     });
-    // A task enabled since the plan was read still keeps the thread, and so does one in a side chat it takes.
-    const takesScheduledTask = Effect.fnUntraced(function* (
+    // A task enabled since the plan was read still keeps the family.
+    const heldSincePlan = Effect.fnUntraced(function* (
       thread: OrchestrationV2ThreadShell,
-      cascade: ReadonlyArray<OrchestrationV2ThreadShell>,
+      family: ReadonlyArray<OrchestrationV2ThreadShell>,
     ) {
-      const scheduled = yield* sweep.readScheduledThreadIds;
-      if (!keptWithSideChats(cascade, (candidate) => scheduled.has(candidate.id))(thread))
-        return false;
-      entries.push({
-        ...entryFor(thread),
-        outcome: "kept",
-        reason: "thread has a scheduled task",
+      const reason = familyHold(family, {
+        ...hold,
+        scheduledThreadIds: yield* sweep.readScheduledThreadIds,
       });
+      if (reason === null) return false;
+      entries.push({ ...entryFor(thread), outcome: "kept", reason });
       return true;
     });
     let deleted = false;
-    for (const { thread, archivedAt } of plan.deletions) {
-      if (yield* takesScheduledTask(thread, threads)) continue;
+    for (const { thread, family, archivedAt } of plan.deletions) {
+      if (yield* heldSincePlan(thread, family)) continue;
       // A delete can't be undone, so a rule changed since the plan stops it; the change sweeps again.
       const { storageCleanup } = yield* settingsService.getSettings;
       if (storageCleanup.archivedThreadsAfterDays !== archivedThreadsAfterDays) break;
-      yield* apply(
+      const outcome = yield* apply(
         thread,
         {
           type: "thread.delete",
@@ -250,7 +276,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
         },
         `Deleted after ${archivedThreadsAfterDays} days archived`,
       );
-      deleted ||= entries.at(-1)?.outcome === "removed";
+      if (outcome === "removed") deleted = true;
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
     // A refresh that finds a pull request still open leaves its thread's clock alone, so each
@@ -263,9 +289,8 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* <
       pullRequestSync.requestSync,
       { discard: true },
     );
-    const unarchived = threads.filter((thread) => thread.archivedAt === null);
-    for (const { thread, sideChatsUnchangedSince } of plan.archives) {
-      if (yield* takesScheduledTask(thread, unarchived)) continue;
+    for (const { thread, family, sideChatsUnchangedSince } of plan.archives) {
+      if (yield* heldSincePlan(thread, family)) continue;
       yield* apply(
         thread,
         {
