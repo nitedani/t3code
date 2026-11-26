@@ -44,18 +44,11 @@ function holdOf(
   return null;
 }
 
-const SIDE_CHAT_HOLDS: ReadonlySet<string> = new Set([
-  "thread is working",
-  "thread has a scheduled task",
-  "thread is pinned",
-  "thread is snoozed",
-]);
-
 /** A family is a listed thread followed by the side chats its archive or delete takes with it. */
 function familyHold(family: ReadonlyArray<OrchestrationV2ThreadShell>, context: HoldContext) {
-  for (const [index, member] of family.entries()) {
+  for (const member of family) {
     const hold = holdOf(member, context);
-    if (hold !== null && (index === 0 || SIDE_CHAT_HOLDS.has(hold))) return hold;
+    if (hold !== null) return hold;
   }
   return null;
 }

@@ -4639,6 +4639,11 @@ describe("settled and archived thread cleanup", () => {
           settled("archived-unarchived-side-chat", {
             lineage: sideChatOf("archived-unarchived-side-chat-parent"),
           }),
+          settled("settled-guest-waiting-side-chat-parent"),
+          settled("settled-guest-waiting-side-chat", {
+            lineage: sideChatOf("settled-guest-waiting-side-chat-parent"),
+            pendingGuestMessageCount: 1,
+          }),
         ]);
         fixture.setScheduledThreadIds([
           "settled-scheduled",
