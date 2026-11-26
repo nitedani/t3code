@@ -4611,6 +4611,18 @@ describe("settled and archived thread cleanup", () => {
             lineage: sideChatOf("archived-expired"),
             archivedAt: at(-8 * DAY_MS),
           }),
+          settled("settled-pinned-side-chat-parent"),
+          settled("settled-pinned-side-chat", {
+            lineage: sideChatOf("settled-pinned-side-chat-parent"),
+            pinnedAt: at(-31 * DAY_MS),
+          }),
+          settled("archived-snoozed-side-chat-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-snoozed-side-chat", {
+            lineage: sideChatOf("archived-snoozed-side-chat-parent"),
+            archivedAt: at(-8 * DAY_MS),
+            snoozedAt: at(-9 * DAY_MS),
+            snoozedUntil: at(DAY_MS),
+          }),
         ]);
         fixture.setScheduledThreadIds([
           "settled-scheduled",

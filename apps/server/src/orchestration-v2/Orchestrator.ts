@@ -1950,6 +1950,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .findThread(threadId)
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
+  // A guarded archive or delete leaves a pinned or snoozed side chat, and so its parent, in view.
+  const keptInView = (thread: OrchestrationV2AppThread, now: DateTime.Utc) =>
+    thread.pinnedAt != null ||
+    (thread.snoozedUntil != null &&
+      DateTime.toEpochMillis(thread.snoozedUntil) > DateTime.toEpochMillis(now));
+
   /** Side chats live inside their parent, so deleting or archiving the parent takes them too. */
   const liveSideChatIds = Effect.fn("Orchestrator.liveSideChatIds")(
     function* (threadId: ThreadId) {
@@ -16173,7 +16179,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const records = yield* projectionStore
               .getThreadRecords(threadId, ["runs", "runtimeRequests"])
               .pipe(mapDispatchError(command));
-            if (sideChat.archivedAt === null || threadHasUnfinishedWork(records)) {
+            if (
+              sideChat.archivedAt === null ||
+              keptInView(sideChat, now) ||
+              threadHasUnfinishedWork(records)
+            ) {
               return yield* new OrchestratorDispatchError({
                 commandId: command.commandId,
                 commandType: command.type,
@@ -16242,6 +16252,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .pipe(mapDispatchError(command));
               if (
                 DateTime.toEpochMillis(sideChat.updatedAt) > cutoff ||
+                keptInView(sideChat, yield* DateTime.now) ||
                 threadHasUnfinishedWork(records)
               ) {
                 return yield* new OrchestratorDispatchError({

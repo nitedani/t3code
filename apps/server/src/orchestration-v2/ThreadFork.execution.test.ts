@@ -1649,6 +1649,82 @@ it.effect("a guarded archive keeps a settled parent whose side chat is working",
   }).pipe(Effect.provide(forkCases[0]!.layer)),
 );
 
+it.effect("a guarded archive or delete keeps a parent whose side chat is pinned or snoozed", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const thread = (threadId: ThreadId) =>
+      orchestrator
+        .getThreadProjection(threadId)
+        .pipe(Effect.map((projection) => projection.thread));
+    for (const kept of ["pin", "snooze"] as const) {
+      const parentId = ThreadId.make(`${kept}-side-chat-parent`);
+      const sideChatId = ThreadId.make(`${kept}-side-chat`);
+      yield* createParent(parentId);
+      yield* writeParentRun({
+        threadId: parentId,
+        runId: RunId.make(`${kept}-side-chat-parent-run`),
+        ordinal: 1,
+        status: "completed",
+        text: "Parent work",
+        stable: true,
+      });
+      yield* forkSideChat(`${kept}-side-chat-fork`, parentId, sideChatId);
+      yield* orchestrator.dispatch(
+        kept === "pin"
+          ? {
+              type: "thread.pin",
+              commandId: CommandId.make(`${kept}-side-chat-keep`),
+              threadId: sideChatId,
+            }
+          : {
+              type: "thread.snooze",
+              commandId: CommandId.make(`${kept}-side-chat-keep`),
+              threadId: sideChatId,
+              snoozedUntil: DateTime.formatIso(DateTime.add(yield* DateTime.now, { days: 60 })),
+            },
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make(`${kept}-side-chat-settle`),
+        threadId: parentId,
+      });
+      yield* TestClock.adjust("31 days");
+      const archived = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make(`${kept}-side-chat-sweep-archive`),
+          threadId: parentId,
+          expectedUpdatedAt: (yield* thread(parentId)).updatedAt,
+          sideChatsUnchangedSince: DateTime.subtract(yield* DateTime.now, { days: 30 }),
+        })
+        .pipe(Effect.flip);
+      assert.include(String(archived.cause), "has a side chat in use");
+      assert.isNull((yield* thread(sideChatId)).archivedAt);
+
+      // Archiving by hand takes the side chat along with its pin or snooze.
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make(`${kept}-side-chat-archive`),
+        threadId: parentId,
+      });
+      yield* TestClock.adjust("8 days");
+      const removed = yield* orchestrator
+        .dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make(`${kept}-side-chat-sweep-delete`),
+          threadId: parentId,
+          expectedArchivedAt: (yield* thread(parentId)).archivedAt!,
+        })
+        .pipe(Effect.flip);
+      assert.include(String(removed.cause), "has a side chat in use");
+      assert.deepStrictEqual(
+        [(yield* thread(parentId)).deletedAt, (yield* thread(sideChatId)).deletedAt],
+        [null, null],
+      );
+    }
+  }).pipe(Effect.provide(forkCases[0]!.layer)),
+);
+
 it.effect("a side chat opened during the parent's first turn starts from a digest", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

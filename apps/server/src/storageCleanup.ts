@@ -325,20 +325,17 @@ export function storageCleanupPullRequestMerged(
   );
 }
 
-// Deleting a parent takes all its side chats, so a task in any of them keeps it too.
-function deletionTakesScheduledTask(
+// A parent's archive or delete takes its side chats among `threads`, so a kept side chat keeps the parent.
+function keptWithSideChats(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
-  scheduledThreadIds: ReadonlySet<string>,
+  kept: (thread: OrchestrationV2ThreadShell) => boolean,
 ) {
-  const parentsOfScheduledSideChats = new Set(
+  const parentsOfKept = new Set(
     threads.flatMap((thread) =>
-      thread.lineage.sideChat === true && scheduledThreadIds.has(thread.id)
-        ? [thread.lineage.parentThreadId]
-        : [],
+      thread.lineage.sideChat === true && kept(thread) ? [thread.lineage.parentThreadId] : [],
     ),
   );
-  return (threadId: ThreadId) =>
-    scheduledThreadIds.has(threadId) || parentsOfScheduledSideChats.has(threadId);
+  return (thread: OrchestrationV2ThreadShell) => kept(thread) || parentsOfKept.has(thread.id);
 }
 
 /**
@@ -369,25 +366,19 @@ function planThreadCleanup({
   const idle = threads.filter(
     (thread) =>
       // Side chats follow their parent; subagent threads are not cleaned.
-      isListedThreadLineage(thread.lineage) &&
-      // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
-      !scheduledThreadIds.has(thread.id) &&
-      threadIdle(thread, now, settings) &&
-      // Pinning or snoozing a thread keeps it in view, archived or not.
-      thread.pinnedAt == null &&
-      !isSnoozed(thread, now),
+      isListedThreadLineage(thread.lineage) && threadIdle(thread, now, settings),
   );
-  const takesScheduledTask = deletionTakesScheduledTask(threads, scheduledThreadIds);
-  // Archiving a parent takes its unarchived side chats.
-  const heldFromArchive = new Set(
-    threads
-      .filter(
-        (thread) =>
-          thread.lineage.sideChat === true &&
-          thread.archivedAt === null &&
-          scheduledThreadIds.has(thread.id),
-      )
-      .map((sideChat) => sideChat.lineage.parentThreadId),
+  const keep = (thread: OrchestrationV2ThreadShell) =>
+    // A scheduled task's later runs post to its thread, and deleting the thread deletes the task.
+    scheduledThreadIds.has(thread.id) ||
+    // Pinning or snoozing a thread keeps it in view, archived or not.
+    thread.pinnedAt != null ||
+    isSnoozed(thread, now);
+  // Deleting a parent takes all its side chats; archiving it takes the unarchived ones.
+  const keptFromDeletion = keptWithSideChats(threads, keep);
+  const keptFromArchive = keptWithSideChats(
+    threads.filter((thread) => thread.archivedAt === null),
+    keep,
   );
   const deletions =
     archivedThreadsAfterDays === null
@@ -395,7 +386,7 @@ function planThreadCleanup({
       : oldestExpired(
           archivedThreadsAfterDays,
           idle.flatMap((thread) =>
-            thread.archivedAt === null || takesScheduledTask(thread.id)
+            thread.archivedAt === null || keptFromDeletion(thread)
               ? []
               : [
                   {
@@ -427,7 +418,7 @@ function planThreadCleanup({
     thread.archivedAt === null &&
     thread.settledOverride === "settled" &&
     thread.settledAt !== null &&
-    !heldFromArchive.has(thread.id)
+    !keptFromArchive(thread)
       ? [{ thread, sinceMs: shelfClockMs(thread), pullRequests: heldByPullRequests(thread) }]
       : [],
   );
@@ -2190,7 +2181,8 @@ const make = Effect.gen(function* () {
     });
     for (const { thread, archivedAt } of plan.deletions) {
       // A delete can't be undone, so a task enabled since the plan was read still keeps the thread.
-      if (deletionTakesScheduledTask(threads, yield* readScheduledThreadIds())(thread.id)) {
+      const scheduled = yield* readScheduledThreadIds();
+      if (keptWithSideChats(threads, (candidate) => scheduled.has(candidate.id))(thread)) {
         entries.push({
           ...entryFor(thread),
           outcome: "kept",
