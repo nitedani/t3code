@@ -4752,6 +4752,49 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("keeps a deleted thread in the report of the sweep its deletion requests", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          archivedThreadsAfterDays: 7,
+        });
+        const archived = settled("archived-expired", { archivedAt: at(-8 * DAY_MS) });
+        fixture.setThreads([archived]);
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        fixture.setOnDispatch((command) => {
+          if (command.type !== "thread.delete") return;
+          fixture.setThreads([]);
+          Queue.offerUnsafe(events, {
+            id: EventId.make("event:auto-delete"),
+            type: "thread.deleted",
+            threadId: archived.id,
+            occurredAt: at(0),
+            payload: { ...archived, deletedAt: at(0), lastVisitedAt: null },
+          } as OrchestrationV2DomainEvent);
+        });
+        const reports = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* fixture.activate(Stream.fromQueue(events));
+        yield* Fiber.join(reports);
+        yield* fixture.service.drain;
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "archived-expired", outcome: "removed" },
+        ]);
+        // The hourly sweep after it lists only its own threads.
+        yield* TestClock.adjust("1 hour");
+        yield* fixture.service.drain;
+        expect((yield* fixture.service.latestReport)?.threads).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("stops deleting once the rule is switched off or lengthened during the sweep", () =>
     runCleanupTest(
       Effect.gen(function* () {

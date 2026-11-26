@@ -2142,7 +2142,7 @@ const make = Effect.gen(function* () {
     entries: StorageCleanupThreadEntry[],
   ) {
     const { settledThreadsAfterDays, archivedThreadsAfterDays } = serverSettings.storageCleanup;
-    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return;
+    if (settledThreadsAfterDays === null && archivedThreadsAfterDays === null) return false;
     const { projects, threads } = yield* readThreads();
     const plan = planThreadCleanup({
       threads,
@@ -2196,6 +2196,7 @@ const make = Effect.gen(function* () {
       entries.push({ ...entryFor(thread), outcome: "kept", reason: "thread has a scheduled task" });
       return true;
     });
+    let deleted = false;
     for (const { thread, archivedAt } of plan.deletions) {
       if (yield* takesScheduledTask(thread, threads)) continue;
       // A delete can't be undone, so a rule changed since the plan stops it; the change sweeps again.
@@ -2211,6 +2212,7 @@ const make = Effect.gen(function* () {
         },
         `Deleted after ${archivedThreadsAfterDays} days archived`,
       );
+      deleted ||= entries.at(-1)?.outcome === "removed";
     }
     // A settled thread's links are read only on request, so a merge or close would go unseen.
     // A refresh that finds a pull request still open leaves its thread's clock alone, so each
@@ -2238,6 +2240,7 @@ const make = Effect.gen(function* () {
         `Archived after ${settledThreadsAfterDays} days settled`,
       );
     }
+    return deleted;
   });
 
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
@@ -2357,10 +2360,12 @@ const make = Effect.gen(function* () {
   let keptDeletedWorktrees: ReadonlyArray<string> = [];
   let deletions = 0;
   let sweptDeletions = 0;
+  let threadsFromDeletion: ReadonlyArray<StorageCleanupThreadEntry> = [];
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
   ) {
     const deletionsAtStart = deletions;
+    const followsDeletions = deletionsAtStart !== sweptDeletions;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
@@ -2413,7 +2418,7 @@ const make = Effect.gen(function* () {
     // After the worktree rules, which a deletion would otherwise hand a tombstone; its
     // thread.deleted requests the sweep that cleans up after it.
     const threadEntries: StorageCleanupThreadEntry[] = [];
-    yield* cleanThreads(serverSettings, now, threadEntries).pipe(
+    const deletedThreads = yield* cleanThreads(serverSettings, now, threadEntries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           threadEntries.push({
@@ -2424,9 +2429,15 @@ const make = Effect.gen(function* () {
             threadTitle: null,
           });
           yield* Effect.logWarning("thread cleanup failed", { error });
+          return false;
         }),
       ),
     );
+    // The sweeps a deletion requests keep showing the threads it deleted until one finds threads of its own.
+    const followsThreadDeletion =
+      !deletedThreads && followsDeletions && trigger === "automatic" && threadEntries.length === 0;
+    const reportedThreads = followsThreadDeletion ? threadsFromDeletion : threadEntries;
+    threadsFromDeletion = deletedThreads || followsThreadDeletion ? reportedThreads : [];
     for (const category of [
       {
         kind: "browser-artifacts" as const,
@@ -2497,7 +2508,7 @@ const make = Effect.gen(function* () {
       counts,
       bytesFreed,
       omittedCount: Math.max(0, entries.length - REPORT_ENTRY_LIMIT),
-      threads: threadEntries,
+      threads: reportedThreads,
     };
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;
