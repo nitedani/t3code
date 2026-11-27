@@ -110,7 +110,7 @@ export const makeThreadRetention = Effect.fn("ThreadRetention.make")(function* (
   const readFacts = Effect.all({
     settings: settingsService.getSettings,
     scheduledThreadIds: sweep.readScheduledThreadIds,
-    // A side chat waiting on delegated tasks has a finished turn, so its shell reads idle.
+    // The shell hides work from rewound turns while their delegated child can still run.
     delegatingThreadIds: projections
       .listDelegatingThreadIds()
       .pipe(Effect.map((threadIds) => new Set<string>(threadIds))),
