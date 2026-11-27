@@ -12,6 +12,8 @@ export interface UnavailableProviderSnapshotInput {
   readonly driverKind: ProviderDriverKind | string;
   readonly instanceId: ProviderInstanceId;
   readonly displayName?: string | undefined;
+  /** The label a live snapshot of this driver reports when the settings name none. */
+  readonly defaultDisplayName?: string | undefined;
   readonly accentColor?: string | undefined;
   readonly reason: string;
   readonly checkedAt?: string;
@@ -24,7 +26,7 @@ export const buildUnavailableProviderSnapshot = Effect.fn(
 )(function* (input: UnavailableProviderSnapshotInput): Effect.fn.Return<ServerProvider> {
   const checkedAt = input.checkedAt ?? (yield* nowIso);
   const customDisplayName = input.displayName?.trim();
-  const displayName = customDisplayName || (input.driverKind as string);
+  const displayName = customDisplayName || input.defaultDisplayName || (input.driverKind as string);
 
   // No driver ran, so its setup capabilities are still unknown.
   const { setup: _setup, ...base } = buildServerProvider({

@@ -450,6 +450,21 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("labels an unnamed unavailable instance with its driver's label, as a live one", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claude_2");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [ClaudeDriver],
+        configMap: { [instanceId]: { driver: ProviderDriverKind.make("claudeAgent") } },
+        blockedReason: () => "Blocked by policy.",
+      });
+
+      const [unavailable] = yield* registry.listUnavailable;
+      expect(unavailable?.displayName).toBe("Claude");
+      expect(unavailable?.hasCustomDisplayName).toBeUndefined();
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.live("runs Codex and Claude readiness probes from configured tilde paths", () =>
     Effect.gen(function* () {
       if (yield* HostProcess.isWindows) return;

@@ -286,30 +286,32 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     deferSecrets,
     carriedSecrets,
   } = input;
+  const driver = driversById.get(entry.driver);
+  const defaultSnapshotDisplayName = driver?.metadata.snapshotOmitsDisplayName
+    ? undefined
+    : driver?.metadata.displayName;
+  const unavailableSnapshot = (reason: string) =>
+    buildUnavailableProviderSnapshot({
+      driverKind: entry.driver,
+      instanceId,
+      displayName: entry.displayName,
+      defaultDisplayName: defaultSnapshotDisplayName,
+      accentColor: entry.accentColor,
+      reason,
+    });
   const blocked = input.blockedReason(entry.driver);
   if (blocked !== undefined) {
     return {
       kind: "unavailable" as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: blocked,
-      }),
+      snapshot: yield* unavailableSnapshot(blocked),
     };
   }
-  const driver = driversById.get(entry.driver);
   if (!driver) {
     return {
       kind: "unavailable" as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: `Driver '${entry.driver}' is not registered in this build.`,
-      }),
+      snapshot: yield* unavailableSnapshot(
+        `Driver '${entry.driver}' is not registered in this build.`,
+      ),
     };
   }
 
@@ -325,13 +327,9 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     });
     return {
       kind: "unavailable" as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: `Invalid config for instance '${rawInstanceId}': ${detail}`,
-      }),
+      snapshot: yield* unavailableSnapshot(
+        `Invalid config for instance '${rawInstanceId}': ${detail}`,
+      ),
     };
   }
 
@@ -340,13 +338,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
   if (deferSecrets && enabled && secretReferencesOf(driversById, entry).length > 0) {
     return {
       kind: "unavailable" as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: "Reading secrets…",
-      }),
+      snapshot: yield* unavailableSnapshot("Reading secrets…"),
     };
   }
   const { secrets, unreadable } = carriedSecrets
@@ -363,13 +355,9 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     return {
       kind: "unavailable" as const,
       secretsUnreadable: true as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: `Could not read ${unreadable.join(", ")} from its secret provider. Unlock it, then refresh.`,
-      }),
+      snapshot: yield* unavailableSnapshot(
+        `Could not read ${unreadable.join(", ")} from its secret provider. Unlock it, then refresh.`,
+      ),
     };
   }
 
@@ -397,20 +385,16 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     yield* Scope.close(childScope, Exit.void).pipe(Effect.ignore);
     return {
       kind: "unavailable" as const,
-      snapshot: yield* buildUnavailableProviderSnapshot({
-        driverKind: entry.driver,
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        reason: `Driver '${entry.driver}' failed to create instance: ${createResult.failure.detail}`,
-      }),
+      snapshot: yield* unavailableSnapshot(
+        `Driver '${entry.driver}' failed to create instance: ${createResult.failure.detail}`,
+      ),
     };
   }
 
   const { instance, setPresentation } = withLivePresentation(
     createResult.success,
     entry,
-    driver.metadata.snapshotOmitsDisplayName ? undefined : driver.metadata.displayName,
+    defaultSnapshotDisplayName,
   );
   return {
     kind: "live" as const,
