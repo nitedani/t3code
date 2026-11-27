@@ -4546,7 +4546,10 @@ describe("settled and archived thread cleanup", () => {
           settledThreadsAfterDays: 30,
           archivedThreadsAfterDays: 7,
         });
-        fixture.setSettings({ sidebarAutoSettleKeepPullRequests: true });
+        fixture.setSettings({
+          sidebarAutoSettleKeepPullRequests: true,
+          autoResumeLimitedThreads: true,
+        });
         const openPullRequest = settled("settled-open-pull-request", {
           pullRequests: [
             {
@@ -4644,6 +4647,17 @@ describe("settled and archived thread cleanup", () => {
           settled("settled-guest-waiting-side-chat", {
             lineage: sideChatOf("settled-guest-waiting-side-chat-parent"),
             pendingGuestMessageCount: 1,
+          }),
+          // Auto-resume runs a side chat again once its usage limit resets.
+          settled("settled-limited-side-chat-parent"),
+          settled("settled-limited-side-chat", {
+            lineage: sideChatOf("settled-limited-side-chat-parent"),
+            settledOverride: null,
+            settledAt: null,
+            status: "failed",
+            latestRunId: RunId.make("limited-side-chat-run"),
+            lastErrorClass: "usage_limit",
+            usageLimitResetAt: DateTime.formatIso(at(DAY_MS)),
           }),
         ]);
         fixture.setScheduledThreadIds([
