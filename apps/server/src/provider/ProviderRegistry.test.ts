@@ -2989,7 +2989,6 @@ it.layer(
             assert.isTrue(Option.isSome(yield* Fiber.join(relabelled)));
           });
         yield* relabel("Account B", true);
-        // Naming an instance exactly its driver's label changes only whether the name was set.
         yield* relabel("Antigravity", undefined);
         yield* relabel("Antigravity", true);
         yield* relabel("Antigravity", undefined);
