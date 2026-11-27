@@ -2201,7 +2201,7 @@ const make = Effect.gen(function* () {
     // thread.deleted requests the sweep that cleans up after it.
     const threadEntries = yield* retention.retire(now);
     // Until a sweep finds threads of its own, the one after a deletion keeps the last run's
-    // threads, and a later one those whose deleted thread's worktree it removed.
+    // threads, and a later one the last run's rows of deleted threads whose worktree it removed.
     const lastThreads = (yield* SubscriptionRef.get(reportRef))?.threads ?? [];
     const removedDeletedThreadIds = new Set<string>(deletedWorktrees.removedDeletedThreadIds);
     const reportedThreads =
