@@ -366,13 +366,15 @@ export function buildModelOptions(
     const accentColor = normalizeProviderAccentColor(
       snapshot?.accentColor ?? instance?.accentColor,
     );
+    const name =
+      snapshot?.displayName !== undefined
+        ? { displayName: snapshot.displayName, hasCustomDisplayName: snapshot.hasCustomDisplayName }
+        : {
+            displayName: instance?.displayName,
+            hasCustomDisplayName: instance?.displayName !== undefined,
+          };
     return {
-      displayName: resolveProviderInstanceDisplayName({
-        instanceId,
-        driver,
-        displayName: snapshot?.displayName ?? instance?.displayName,
-        hasCustomDisplayName: snapshot?.hasCustomDisplayName ?? instance?.displayName !== undefined,
-      }),
+      displayName: resolveProviderInstanceDisplayName({ instanceId, driver, ...name }),
       ...(accentColor ? { accentColor } : {}),
       showBadge: shouldShowInstanceBadge(
         {

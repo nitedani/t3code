@@ -313,6 +313,39 @@ describe("mobile model options", () => {
     ).toBe(false);
   });
 
+  it("takes an account's name and whether it was set from the same source", () => {
+    const provider = {
+      instanceId: "claude_2",
+      driver: "claudeAgent",
+      displayName: "Claude",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [{ slug: "test", name: "Test", capabilities: null }],
+    };
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: { claude_2: { driver: "claudeAgent", displayName: "Work" } },
+    };
+    const renamedBeforeSnapshot = { providers: [provider], settings } as unknown as ServerConfig;
+    expect(
+      buildModelOptions(renamedBeforeSnapshot, null, undefined, null)[0]?.providerBadge
+        ?.displayName,
+    ).toBe("Claude 2");
+    const namedInSettingsOnly = {
+      providers: [],
+      settings: {
+        ...settings,
+        providerInstances: { claude_2: { driver: "claudeAgent", displayName: "Claude" } },
+      },
+    } as unknown as ServerConfig;
+    const selection = { instanceId: ProviderInstanceId.make("claude_2"), model: "saved" };
+    expect(
+      buildModelOptions(namedInSettingsOnly, selection, undefined, null)[0]?.providerBadge
+        ?.displayName,
+    ).toBe("Claude");
+  });
+
   it("only badges ACP accounts that share the same agent", () => {
     const config = {
       settings: {
