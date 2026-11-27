@@ -1,9 +1,11 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
   NodeId,
@@ -18,10 +20,15 @@ import {
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Statement from "effect/sql/Statement";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -31,8 +38,14 @@ import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Settings from "../serverSettings.ts";
+import { storageCleanupThreadIdle } from "../storageCleanup.ts";
+import { makeThreadRetention } from "../threadRetention.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const forkCases = (
@@ -60,7 +73,7 @@ const forkCases = (
     { runEffectWorker: false },
   );
 
-  return { driver, status, instanceId, modelSelection, layer };
+  return { driver, status, instanceId, modelSelection, adapter, layer };
 });
 
 it.effect("a persisted fork leaves PR watching with its parent until explicitly opted in", () =>
@@ -1468,6 +1481,423 @@ it.effect(
       assert.isNull(yield* archivedAt(busy));
       assert.deepEqual(yield* archivedAt(archivedFirst), childArchivedAt);
     }).pipe(Effect.provide(forkCases[0]!.layer)),
+);
+
+it.effect("a guarded archive or delete takes a family only as its caller read it", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const parentId = ThreadId.make("guarded-cleanup-parent");
+    const sideChatId = ThreadId.make("guarded-cleanup-side-chat");
+    yield* createParent(parentId);
+    yield* writeParentRun({
+      threadId: parentId,
+      runId: RunId.make("guarded-cleanup-parent-run"),
+      ordinal: 1,
+      status: "completed",
+      text: "Parent work",
+      stable: true,
+    });
+    const thread = (threadId: ThreadId) =>
+      orchestrator
+        .getThreadProjection(threadId)
+        .pipe(Effect.map((projection) => projection.thread));
+    // Built from the shell snapshot, the read thread retention builds its token from.
+    const asRead = (...threadIds: ReadonlyArray<ThreadId>) =>
+      orchestrator.getShellSnapshot().pipe(
+        Effect.map(({ threads, archivedThreads }) =>
+          threadIds.map((threadId) => ({
+            threadId,
+            updatedAt: [...threads, ...archivedThreads].find((shell) => shell.id === threadId)!
+              .updatedAt,
+          })),
+        ),
+      );
+    const guarded = (
+      type: "thread.archive" | "thread.delete",
+      commandId: string,
+      ifUnchanged: ReadonlyArray<{ readonly threadId: ThreadId; readonly updatedAt: DateTime.Utc }>,
+    ) =>
+      orchestrator.dispatch({
+        type,
+        commandId: CommandId.make(commandId),
+        threadId: parentId,
+        ifUnchanged,
+      });
+    const archivedAndDeleted = Effect.gen(function* () {
+      const [parent, sideChat] = [yield* thread(parentId), yield* thread(sideChatId)];
+      return [parent.archivedAt !== null, sideChat.archivedAt !== null, parent.deletedAt !== null];
+    });
+
+    const parentBefore = yield* asRead(parentId);
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("guarded-cleanup-settle"),
+      threadId: parentId,
+    });
+    const parentChanged = yield* guarded(
+      "thread.archive",
+      "guarded-cleanup-archive-parent-changed",
+      parentBefore,
+    ).pipe(Effect.flip);
+    assert.include(String(parentChanged.cause), "changed since it was read");
+
+    yield* TestClock.adjust("1 second");
+    yield* forkSideChat("guarded-cleanup-fork", parentId, sideChatId);
+    const appeared = yield* guarded(
+      "thread.archive",
+      "guarded-cleanup-archive-side-chat-appeared",
+      yield* asRead(parentId),
+    ).pipe(Effect.flip);
+    assert.include(String(appeared.cause), "changed since it was read");
+
+    const family = yield* asRead(parentId, sideChatId);
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch({
+      type: "thread.pin",
+      commandId: CommandId.make("guarded-cleanup-pin-side-chat"),
+      threadId: sideChatId,
+    });
+    const sideChatChanged = yield* guarded(
+      "thread.archive",
+      "guarded-cleanup-archive-side-chat-changed",
+      [...(yield* asRead(parentId)), family[1]!],
+    ).pipe(Effect.flip);
+    assert.include(String(sideChatChanged.cause), "changed since it was read");
+    assert.deepStrictEqual(yield* archivedAndDeleted, [false, false, false]);
+
+    yield* guarded(
+      "thread.archive",
+      "guarded-cleanup-archive",
+      yield* asRead(parentId, sideChatId),
+    );
+    assert.deepStrictEqual(yield* archivedAndDeleted, [true, true, false]);
+
+    const archived = yield* asRead(parentId, sideChatId);
+    yield* TestClock.adjust("1 second");
+    for (const type of ["thread.unarchive", "thread.archive"] as const) {
+      yield* orchestrator.dispatch({
+        type,
+        commandId: CommandId.make(`guarded-cleanup-side-chat-${type}`),
+        threadId: sideChatId,
+      });
+    }
+    const stale = yield* guarded("thread.delete", "guarded-cleanup-delete-stale", [
+      ...(yield* asRead(parentId)),
+      archived[1]!,
+    ]).pipe(Effect.flip);
+    assert.include(String(stale.cause), "changed since it was read");
+    assert.deepStrictEqual(yield* archivedAndDeleted, [true, true, false]);
+
+    yield* guarded("thread.delete", "guarded-cleanup-delete", yield* asRead(parentId, sideChatId));
+    assert.isNotNull((yield* thread(parentId)).deletedAt);
+    assert.isNotNull((yield* thread(sideChatId)).deletedAt);
+
+    const delegatingParentId = ThreadId.make("guarded-cleanup-delegating-parent");
+    const delegatingId = ThreadId.make("guarded-cleanup-delegating");
+    yield* createParent(delegatingParentId);
+    yield* writeParentRun({
+      threadId: delegatingParentId,
+      runId: RunId.make("guarded-cleanup-delegating-parent-run"),
+      ordinal: 1,
+      status: "completed",
+      text: "Parent work",
+      stable: true,
+    });
+    yield* forkSideChat("guarded-cleanup-delegating-fork", delegatingParentId, delegatingId);
+    yield* askSideChat(delegatingId, "guarded-cleanup-delegating-ask");
+    const beforeTask = yield* asRead(delegatingParentId, delegatingId);
+    const run = (yield* orchestrator.getThreadProjection(delegatingId)).runs.at(-1)!;
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      commandId: CommandId.make("guarded-cleanup-delegate"),
+      parentThreadId: delegatingId,
+      parentRunId: run.id,
+      parentNodeId: run.rootNodeId!,
+      task: "Review the changes",
+      modelSelection: forkCases[0]!.modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionWake: "always",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    const taskStarted = yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("guarded-cleanup-archive-task-started"),
+        threadId: delegatingParentId,
+        ifUnchanged: beforeTask,
+      })
+      .pipe(Effect.flip);
+    assert.include(String(taskStarted.cause), "changed since it was read");
+    assert.isNull((yield* thread(delegatingParentId)).archivedAt);
+  }).pipe(Effect.provide(forkCases[0]!.layer)),
+);
+
+it.effect(
+  "thread retention keeps a settled family while a rewound side chat's delegated task runs",
+  () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("retention-rewound-delegation");
+      const { driver, instanceId, modelSelection } = forkCases[1]!;
+      const turns: Array<{
+        readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
+        readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>;
+      }> = [];
+      const providerThread = (
+        threadId: ThreadId,
+        providerSessionId: ProviderSessionId,
+        now: DateTime.Utc,
+      ) => ({
+        id: ProviderThreadId.make(`provider-thread:${threadId}`),
+        driver,
+        providerInstanceId: instanceId,
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: { driver, nativeId: `native:${threadId}`, strength: "strong" as const },
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+        ...forkCases[1]!.adapter,
+        openSession: (session) =>
+          Effect.gen(function* () {
+            const now = yield* DateTime.now;
+            const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+            return {
+              instanceId,
+              driver,
+              providerSessionId: session.providerSessionId,
+              providerSession: {
+                id: session.providerSessionId,
+                driver,
+                providerInstanceId: instanceId,
+                status: "ready",
+                cwd,
+                model: modelSelection.model,
+                capabilities: ClaudeProviderCapabilitiesV2,
+                createdAt: now,
+                updatedAt: now,
+                lastError: null,
+              },
+              events: Stream.fromQueue(events),
+              ensureThread: ({ threadId }) =>
+                Effect.succeed(providerThread(threadId, session.providerSessionId, now)),
+              resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+              forkThread: ({ targetThreadId }) =>
+                Effect.succeed(providerThread(targetThreadId, session.providerSessionId, now)),
+              rollbackThread: ({ providerThread }) =>
+                Effect.succeed({ providerThread, messages: [], runtimeRequests: [] }),
+              startTurn: (turn) =>
+                Effect.gen(function* () {
+                  turns.push({ turn, events });
+                  yield* Queue.offer(events, {
+                    type: "provider_turn.updated",
+                    driver,
+                    providerTurn: {
+                      id: ProviderTurnId.make(`provider-turn:${turn.attemptId}`),
+                      providerThreadId: turn.providerThread.id,
+                      nodeId: turn.rootNodeId,
+                      runAttemptId: turn.attemptId,
+                      nativeTurnRef: null,
+                      ordinal: turn.providerTurnOrdinal,
+                      status: "running",
+                      startedAt: now,
+                      completedAt: null,
+                    },
+                  });
+                }),
+              steerTurn: () => Effect.die("unused"),
+              interruptTurn: () => Effect.void,
+              respondToRuntimeRequest: () => Effect.die("unused"),
+              readThreadSnapshot: () => Effect.die("unused"),
+            };
+          }),
+      };
+      const database = SqlitePersistence.layerMemory;
+      const layer = Layer.mergeAll(
+        database,
+        NodeCrypto.layer,
+        ProviderReplayHarness.layerWithRegistry(
+          { name: "retention-rewound-delegation" },
+          ProviderAdapterRegistry.layerSingle(adapter),
+          { databaseLayer: database, runEffectWorker: false },
+        ),
+        ProjectionStore.layer.pipe(Layer.provide(database)),
+        Layer.mock(Settings.ServerSettingsService)({
+          getSettings: Effect.succeed({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageCleanup: {
+              ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+              settledThreadsAfterDays: 30,
+            },
+          }),
+        }),
+        Layer.mock(PullRequestSyncReactor.PullRequestSyncReactor)({
+          requestSync: () => Effect.void,
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const parentId = ThreadId.make("retention-rewound-parent");
+        const sideChatId = ThreadId.make("retention-rewound-side-chat");
+        const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(predicate),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const turnRunning = (threadId: ThreadId) =>
+          watch(
+            (event) =>
+              event.type === "provider-turn.updated" &&
+              event.threadId === threadId &&
+              event.payload.status === "running",
+          );
+        const send = (threadId: ThreadId, text: string) =>
+          Effect.gen(function* () {
+            const running = yield* turnRunning(threadId);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`${threadId}:send`),
+              threadId,
+              messageId: MessageId.make(`${threadId}:message`),
+              text,
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            yield* worker.drain();
+            yield* Fiber.join(running);
+            return (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+          });
+        // The provider ends the turn itself, as it does after an async delegate_task.
+        const endTurn = (threadId: ThreadId, runId: RunId) =>
+          Effect.gen(function* () {
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            const run = projection.runs.find((candidate) => candidate.id === runId)!;
+            const providerTurn = projection.providerTurns.at(-1)!;
+            const { events } = turns.findLast((entry) => entry.turn.threadId === threadId)!;
+            const ended = yield* watch(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === runId &&
+                event.payload.status === "completed",
+            );
+            const now = yield* DateTime.now;
+            yield* Queue.offer(events, {
+              type: "provider_turn.updated",
+              driver,
+              providerTurn: { ...providerTurn, status: "completed", completedAt: now },
+            });
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: providerTurn.providerThreadId,
+              providerTurnId: providerTurn.id,
+              runOrdinal: run.ordinal,
+              status: "completed",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            yield* Fiber.join(ended);
+            yield* worker.drain();
+          });
+
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("retention-rewound-create"),
+          threadId: parentId,
+          projectId: ProjectId.make("retention-rewound-project"),
+          title: "Parent",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* endTurn(parentId, (yield* send(parentId, "Parent work")).id);
+        yield* forkSideChat("retention-rewound-fork", parentId, sideChatId);
+        const sideChatRun = yield* send(sideChatId, "Delegate a review");
+        const childRunning = yield* turnRunning(
+          ThreadId.make("thread:delegated-task:retention-rewound-delegate"),
+        );
+        yield* orchestrator.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make("retention-rewound-delegate"),
+          parentThreadId: sideChatId,
+          parentRunId: sideChatRun.id,
+          parentNodeId: sideChatRun.rootNodeId!,
+          task: "Review the change",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          completionWake: "always",
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        yield* worker.drain();
+        yield* Fiber.join(childRunning);
+        yield* endTurn(sideChatId, sideChatRun.id);
+
+        // A rewind that keeps the files takes the side chat back before the turn that delegated.
+        const baseline = (yield* orchestrator.getThreadProjection(sideChatId)).checkpoints.find(
+          (checkpoint) => checkpoint.ordinalWithinScope === 0,
+        )!;
+        yield* orchestrator.dispatch({
+          type: "checkpoint.rollback",
+          commandId: CommandId.make("retention-rewound-rollback"),
+          threadId: sideChatId,
+          scopeId: baseline.scopeId,
+          checkpointId: baseline.id,
+          restoreFiles: false,
+        });
+        yield* worker.drain();
+        yield* orchestrator.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("retention-rewound-settle"),
+          threadId: parentId,
+        });
+
+        const sideChat = yield* orchestrator.getThreadProjection(sideChatId);
+        assert.deepStrictEqual(
+          [sideChat.runs.at(-1)?.status, sideChat.subagents.map((task) => task.status)],
+          ["rolled_back", ["running"]],
+        );
+        const { threads } = yield* orchestrator.getShellSnapshot();
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const retention = yield* makeThreadRetention({
+          readThreads: Effect.succeed({ projects: [], threads }),
+          readScheduledThreadIds: Effect.succeed(new Set()),
+          threadIdle: storageCleanupThreadIdle,
+          failureReason: (error) => error.message,
+        });
+        assert.isTrue(
+          storageCleanupThreadIdle(
+            threads.find((thread) => thread.id === sideChatId)!,
+            now,
+            DEFAULT_SERVER_SETTINGS,
+          ),
+        );
+        assert.deepStrictEqual(yield* retention.retire(now + 31 * 86_400_000), []);
+        assert.isNull((yield* orchestrator.getThreadProjection(parentId)).thread.archivedAt);
+      }).pipe(Effect.provide(layer));
+    }),
 );
 
 it.effect("a side chat opened during the parent's first turn starts from a digest", () =>

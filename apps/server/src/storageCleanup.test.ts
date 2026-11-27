@@ -4,6 +4,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import type * as Digest from "effect/crypto/Digest";
+import type * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -13,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { SCAN_CACHE_FILE_NAME } from "./usage/usageScanCache.ts";
 import { TestClock } from "effect/testing";
@@ -21,6 +23,7 @@ import * as Sqlite from "./persistence/Sqlite.ts";
 import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointService.ts";
 import {
   DEFAULT_SERVER_SETTINGS,
+  StorageCleanupReport,
   type WorktreeKeepWhen,
   type StorageCleanupSettings,
   type TerminalMetadataStreamEvent,
@@ -40,6 +43,7 @@ import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -382,6 +386,10 @@ const cleanupFixture = (
       remove: () => Effect.succeed({ removed: [], kept: [] }),
     };
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
+    const dispatched: OrchestrationV2ServerCommand[] = [];
+    let changedThreadIds: ThreadId[] = [];
+    let onDispatch = (_command: OrchestrationV2ServerCommand) => {};
+    const requestedPullRequests: number[] = [];
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -446,6 +454,7 @@ const cleanupFixture = (
           ),
         getThreadShell: (threadId: ThreadId) =>
           Effect.sync(() => threads.find((thread) => thread.id === threadId) ?? null),
+        listDelegatingThreadIds: () => Effect.succeed([]),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(ThreadManagement.ThreadManagementService, {
         getShellSnapshot: (input?: { threadIds?: ReadonlyArray<ThreadId> }) =>
@@ -481,7 +490,24 @@ const cleanupFixture = (
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
+        dispatch: (command: OrchestrationV2ServerCommand) =>
+          Effect.suspend(() => {
+            dispatched.push(command);
+            onDispatch(command);
+            return "threadId" in command && changedThreadIds.includes(command.threadId)
+              ? Effect.fail(
+                  new Orchestrator.OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: `Thread ${command.threadId} changed before it was archived.`,
+                  }),
+                )
+              : Effect.succeed({ sequence: 0, storedEvents: [] });
+          }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
+      Effect.provideService(PullRequestSyncReactor.PullRequestSyncReactor, {
+        requestSync: (key) => Effect.sync(() => void requestedPullRequests.push(key.number)),
+      } as PullRequestSyncReactor.PullRequestSyncReactor["Service"]),
       Effect.provideService(
         SqlClient.SqlClient,
         sqlOverride ??
@@ -597,6 +623,14 @@ const cleanupFixture = (
         branchPullRequests = next;
       },
       threadBranches: () => threads.map((thread) => thread.branch),
+      dispatched: () => dispatched,
+      requestedPullRequests: () => requestedPullRequests,
+      changeBeforeDispatch: (threadIds: ThreadId[]) => {
+        changedThreadIds = threadIds;
+      },
+      setOnDispatch: (hook: (command: OrchestrationV2ServerCommand) => void) => {
+        onDispatch = hook;
+      },
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
       },
@@ -689,6 +723,7 @@ const runCleanupTest = <A, E>(
     E,
     | FileSystem.FileSystem
     | Digest.Digest
+    | SecureRandom.SecureRandom
     | ServerConfig.ServerConfig
     | GitVcsDriver.GitVcsDriver
     | Path.Path
@@ -4457,3 +4492,781 @@ it.effect("keeps saved usage data when removing a settled checkout", () =>
     }),
   ),
 );
+
+// The report's entries as clients that predate thread cleanup decode them.
+const decodeOlderReport = Schema.decodeUnknownSync(
+  Schema.toCodecJson(
+    Schema.Struct({
+      entries: Schema.Array(
+        Schema.Struct({ kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]) }),
+      ),
+    }),
+  ),
+);
+const encodeReport = Schema.encodeSync(Schema.toCodecJson(StorageCleanupReport));
+
+describe("settled and archived thread cleanup", () => {
+  const settled = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+    shell({
+      id: ThreadId.make(id),
+      lineage: {
+        rootThreadId: ThreadId.make(id),
+        parentThreadId: null,
+        relationshipToParent: null,
+      },
+      settledOverride: "settled",
+      settledAt: at(-40 * DAY_MS),
+      updatedAt: at(-31 * DAY_MS),
+      ...overrides,
+    });
+  const sideChatOf = (parent: string) => ({
+    rootThreadId: ThreadId.make(parent),
+    parentThreadId: ThreadId.make(parent),
+    relationshipToParent: "fork" as const,
+    sideChat: true,
+  });
+  const firstReport = (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+    Effect.gen(function* () {
+      yield* fixture.activate(Stream.empty);
+      const [report] = yield* fixture.service.reports.pipe(
+        Stream.filter((report) => report !== null),
+        Stream.take(1),
+        Stream.runCollect,
+      );
+      yield* fixture.service.drain;
+      return report!;
+    });
+
+  it.effect("archives idle settled threads and deletes archived ones past their retention", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+          archivedThreadsAfterDays: 7,
+        });
+        fixture.setSettings({
+          sidebarAutoSettleKeepPullRequests: true,
+          autoResumeLimitedThreads: true,
+        });
+        const openPullRequest = settled("settled-open-pull-request", {
+          pullRequests: [
+            {
+              host: "example.test",
+              repository: "owner/repository",
+              number: 42,
+              url: "https://example.test/owner/repository/pull/42",
+              source: "manual",
+              linkedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+              snapshot: {
+                state: "open",
+                title: "Pull request",
+                headBranch: "feature",
+                baseBranch: "main",
+                isDraft: false,
+                updatedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+                syncedAt: DateTime.formatIso(at(-35 * DAY_MS)),
+              },
+              stack: null,
+            },
+          ],
+        });
+        fixture.setThreads([
+          settled("settled-expired"),
+          settled("settled-recent", { updatedAt: at(-29 * DAY_MS) }),
+          settled("settled-snoozed", { snoozedUntil: at(DAY_MS), snoozedAt: at(-31 * DAY_MS) }),
+          settled("settled-woken", {
+            snoozedUntil: at(-60 * 60 * 1_000),
+            snoozedAt: at(-31 * DAY_MS),
+          }),
+          // Marking a woken thread unread clears the snooze and keeps updatedAt.
+          settled("settled-woken-then-unread", { lastSnoozeWakeAt: at(-60 * 60 * 1_000) }),
+          settled("settled-running", { status: "running" }),
+          // A guest message sent before its link expired still waits for an answer.
+          settled("settled-guest-waiting", { pendingGuestMessageCount: 1 }),
+          settled("settled-pinned", { pinnedAt: at(-31 * DAY_MS) }),
+          openPullRequest,
+          settled("settled-dismissed-open", {
+            pullRequests: [
+              { ...openPullRequest.pullRequests![0]!, number: 7, source: "stack-dismissed" },
+            ],
+          }),
+          settled("settled-side-chat", { lineage: sideChatOf("settled-expired") }),
+          settled("settled-dismissed-open-side-chat", {
+            lineage: sideChatOf("settled-dismissed-open"),
+            archivedAt: at(-DAY_MS),
+          }),
+          settled("active-expired", { settledOverride: null, settledAt: null }),
+          settled("archived-expired", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-recent", { archivedAt: at(-6 * DAY_MS) }),
+          settled("archived-pinned", { archivedAt: at(-8 * DAY_MS), pinnedAt: at(-9 * DAY_MS) }),
+          settled("archived-snoozed", {
+            archivedAt: at(-8 * DAY_MS),
+            snoozedAt: at(-9 * DAY_MS),
+            snoozedUntil: at(DAY_MS),
+          }),
+          settled("settled-scheduled"),
+          settled("archived-scheduled", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-parent-side-chat", {
+            lineage: sideChatOf("archived-parent"),
+            archivedAt: at(-8 * DAY_MS),
+          }),
+          settled("archived-expired-side-chat", {
+            lineage: sideChatOf("archived-expired"),
+            archivedAt: at(-8 * DAY_MS),
+          }),
+          settled("settled-pinned-side-chat-parent"),
+          settled("settled-pinned-side-chat", {
+            lineage: sideChatOf("settled-pinned-side-chat-parent"),
+            pinnedAt: at(-31 * DAY_MS),
+          }),
+          settled("archived-snoozed-side-chat-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-snoozed-side-chat", {
+            lineage: sideChatOf("archived-snoozed-side-chat-parent"),
+            archivedAt: at(-8 * DAY_MS),
+            snoozedAt: at(-9 * DAY_MS),
+            snoozedUntil: at(DAY_MS),
+          }),
+          settled("settled-recent-side-chat-parent"),
+          settled("settled-recent-side-chat", {
+            lineage: sideChatOf("settled-recent-side-chat-parent"),
+            updatedAt: at(-DAY_MS),
+          }),
+          settled("settled-working-side-chat-parent"),
+          settled("settled-working-side-chat", {
+            lineage: sideChatOf("settled-working-side-chat-parent"),
+            status: "running",
+          }),
+          settled("archived-unarchived-side-chat-parent", { archivedAt: at(-8 * DAY_MS) }),
+          settled("archived-unarchived-side-chat", {
+            lineage: sideChatOf("archived-unarchived-side-chat-parent"),
+          }),
+          settled("settled-guest-waiting-side-chat-parent"),
+          settled("settled-guest-waiting-side-chat", {
+            lineage: sideChatOf("settled-guest-waiting-side-chat-parent"),
+            pendingGuestMessageCount: 1,
+          }),
+          // Auto-resume runs a side chat again once its usage limit resets.
+          settled("settled-limited-side-chat-parent"),
+          settled("settled-limited-side-chat", {
+            lineage: sideChatOf("settled-limited-side-chat-parent"),
+            settledOverride: null,
+            settledAt: null,
+            status: "failed",
+            latestRunId: RunId.make("limited-side-chat-run"),
+            lastErrorClass: "usage_limit",
+            usageLimitResetAt: DateTime.formatIso(at(DAY_MS)),
+          }),
+        ]);
+        fixture.setScheduledThreadIds([
+          "settled-scheduled",
+          "archived-scheduled",
+          "settled-side-chat",
+          "archived-parent-side-chat",
+          "settled-dismissed-open-side-chat",
+        ]);
+        const report = yield* firstReport(fixture);
+        expect(() => decodeOlderReport(encodeReport(report))).not.toThrow();
+        expect(fixture.dispatched()).toMatchObject([
+          {
+            type: "thread.delete",
+            threadId: "archived-expired",
+            ifUnchanged: [
+              { threadId: "archived-expired", updatedAt: at(-31 * DAY_MS) },
+              { threadId: "archived-expired-side-chat", updatedAt: at(-31 * DAY_MS) },
+            ],
+          },
+          {
+            type: "thread.archive",
+            threadId: "settled-dismissed-open",
+            ifUnchanged: [{ threadId: "settled-dismissed-open", updatedAt: at(-31 * DAY_MS) }],
+          },
+        ]);
+        expect(report.threads).toMatchObject([
+          {
+            threadId: "archived-expired",
+            outcome: "removed",
+            reason: "Deleted after 7 days archived",
+          },
+          {
+            threadId: "settled-dismissed-open",
+            outcome: "removed",
+            reason: "Archived after 30 days settled",
+          },
+        ]);
+
+        // A settled thread's links are re-read only on request, so the sweep asks for the open one.
+        expect(fixture.requestedPullRequests()).toEqual([42]);
+        const [link] = openPullRequest.pullRequests!;
+        fixture.setThreads([
+          {
+            ...openPullRequest,
+            pullRequests: [
+              {
+                ...link!,
+                snapshot: {
+                  ...link!.snapshot!,
+                  state: "merged",
+                  mergedAt: DateTime.formatIso(at(-DAY_MS)),
+                },
+              },
+            ],
+          },
+        ]);
+        yield* fixture.service.runNow;
+        expect(fixture.dispatched().slice(2)).toMatchObject([
+          { type: "thread.archive", threadId: "settled-open-pull-request" },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect.each([
+    {
+      sweep: "deletes",
+      rule: "archivedThreadsAfterDays",
+      first: { archivedAt: at(-9 * DAY_MS) },
+      rest: { archivedAt: at(-8 * DAY_MS) },
+    },
+    {
+      sweep: "archives",
+      rule: "settledThreadsAfterDays",
+      first: { updatedAt: at(-32 * DAY_MS) },
+      rest: {},
+    },
+  ] as const)(
+    "keeps a thread whose task is enabled while the sweep $sweep others",
+    ({ rule, first, rest }) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(NOW_MS);
+          const fixture = yield* cleanupFixture({
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            [rule]: 7,
+          });
+          fixture.setThreads([
+            settled("review-first", first),
+            settled("review-second", rest),
+            settled("review-third", rest),
+            settled("review-third-side-chat", { lineage: sideChatOf("review-third"), ...rest }),
+          ]);
+          fixture.setOnDispatch((command) => {
+            if ("threadId" in command && command.threadId === "review-first")
+              fixture.setScheduledThreadIds(["review-second", "review-third-side-chat"]);
+          });
+          const report = yield* firstReport(fixture);
+          expect(
+            fixture
+              .dispatched()
+              .map((command) => ("threadId" in command ? command.threadId : null)),
+          ).toEqual(["review-first"]);
+          expect(report.threads).toMatchObject([
+            { threadId: "review-first", outcome: "removed" },
+            { threadId: "review-second", outcome: "kept", reason: "thread has a scheduled task" },
+            { threadId: "review-third", outcome: "kept", reason: "thread has a scheduled task" },
+          ]);
+        }),
+      ),
+  );
+
+  it.effect("removes an inactive worktree of an archived thread the same sweep deletes", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: 10,
+          archivedThreadsAfterDays: 7,
+        });
+        const archived = settled("archived-with-worktree", {
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: at(-8 * DAY_MS),
+        });
+        fixture.setThreads([archived]);
+        fixture.setOnDispatch((command) => {
+          if (command.type === "thread.delete")
+            fixture.setThreads([{ ...archived, deletedAt: at(0) }]);
+        });
+        const report = yield* fixture.service.runNow;
+        expect(report.threads).toMatchObject([
+          { threadId: "archived-with-worktree", outcome: "removed" },
+        ]);
+        expect(report.entries.find((entry) => entry.path === fixture.worktree)).toMatchObject({
+          outcome: "removed",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
+
+  it.effect("keeps a deleted thread in the report of the sweep its deletion requests", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          archivedThreadsAfterDays: 7,
+        });
+        const archived = settled("archived-expired", { archivedAt: at(-8 * DAY_MS) });
+        fixture.setThreads([archived]);
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        fixture.setOnDispatch((command) => {
+          if (command.type !== "thread.delete") return;
+          fixture.setThreads([]);
+          Queue.offerUnsafe(events, {
+            id: EventId.make("event:auto-delete"),
+            type: "thread.deleted",
+            threadId: archived.id,
+            occurredAt: at(0),
+            payload: { ...archived, deletedAt: at(0), lastVisitedAt: null },
+          } as OrchestrationV2DomainEvent);
+        });
+        const reports = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* fixture.activate(Stream.fromQueue(events));
+        yield* Fiber.join(reports);
+        yield* fixture.service.drain;
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "archived-expired", outcome: "removed" },
+        ]);
+        // The hourly sweep after it lists only its own threads.
+        yield* TestClock.adjust("1 hour");
+        yield* fixture.service.drain;
+        expect((yield* fixture.service.latestReport)?.threads).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect.each([
+    { stopped: "its worktree's session", stop: "own" },
+    { stopped: "an unrelated session", stop: "unrelated" },
+    { stopped: "the session that kept a live thread's worktree", stop: "live" },
+    { stopped: "its worktree's session, open under a symlinked path,", stop: "alias" },
+    { stopped: "its worktree's session, between its pass's live check and result,", stop: "race" },
+  ] as const)("keeps a deleted thread in the report only once $stopped stops", ({ stop }) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          archivedThreadsAfterDays: 7,
+          worktreeOnDelete: true,
+          worktreeAfterDays: stop === "live" ? 8 : null,
+        });
+        // In the live row, the deleted thread's worktree waits on a terminal while the live
+        // thread's worktree is kept for its open session.
+        const deletedWorktree =
+          stop === "live" ? `${fixture.config.worktreesDir}/other` : fixture.worktree;
+        if (stop === "live")
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "other", deletedWorktree]);
+        const archived = settled("archived-expired", {
+          archivedAt: at(-8 * DAY_MS),
+          branch: stop === "live" ? "other" : "feature",
+          worktreePath: deletedWorktree,
+        });
+        const live = shell({
+          id: ThreadId.make("live-thread"),
+          branch: "feature",
+          worktreePath: fixture.worktree,
+        });
+        const remaining = stop === "live" ? [live] : [];
+        fixture.setThreads([archived, ...remaining]);
+        const alias = `${fixture.config.stateDir}/workspace-alias`;
+        if (stop === "alias") {
+          yield* fixture.fs.makeDirectory(fixture.config.stateDir, { recursive: true });
+          yield* fixture.fs.symlink(fixture.config.worktreesDir, alias);
+          expect(yield* fixture.fs.realPath(`${alias}/feature`)).toBe(
+            yield* fixture.fs.realPath(fixture.worktree),
+          );
+        }
+        const sessionCwd = stop === "alias" ? `${alias}/feature` : fixture.worktree;
+        fixture.setOpenSessionCwd(sessionCwd);
+        if (stop === "live")
+          yield* fixture.setTerminals([
+            {
+              threadId: archived.id,
+              terminalId: "terminal-1",
+              cwd: deletedWorktree,
+              worktreePath: deletedWorktree,
+              status: "running",
+              pid: 1,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "Terminal",
+              updatedAt: DateTime.formatIso(at(0)),
+            },
+          ]);
+        const events = yield* Queue.unbounded<{
+          readonly event: OrchestrationV2DomainEvent;
+          readonly processed: Deferred.Deferred<void> | null;
+        }>();
+        const stopped = {
+          id: EventId.make("event:session-stopped"),
+          type: "provider-session.updated",
+          threadId: {
+            own: archived.id,
+            unrelated: ThreadId.make("unrelated-thread"),
+            live: live.id,
+            alias: archived.id,
+            race: archived.id,
+          }[stop],
+          occurredAt: at(0),
+          payload: {
+            id: ProviderSessionId.make(stop === "unrelated" ? "unrelated-session" : "session-1"),
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "stopped",
+            cwd: stop === "unrelated" ? fixture.repo : sessionCwd,
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: at(-DAY_MS),
+            updatedAt: at(0),
+            lastError: null,
+          },
+        } as OrchestrationV2DomainEvent;
+        fixture.setOnDispatch((command) => {
+          if (command.type !== "thread.delete") return;
+          const deleted = { ...archived, deletedAt: at(0) };
+          fixture.setThreads(remaining);
+          fixture.setDeletedThreads([deleted]);
+          Queue.offerUnsafe(events, {
+            event: {
+              id: EventId.make("event:auto-delete"),
+              type: "thread.deleted",
+              threadId: archived.id,
+              occurredAt: at(0),
+              payload: { ...deleted, lastVisitedAt: null },
+            } as OrchestrationV2DomainEvent,
+            processed: null,
+          });
+          // In the race row, the deletion's pass reads the session live, and it stops and its
+          // event is handled before that pass publishes its result.
+          if (stop === "race")
+            fixture.setOnLiveCheck(
+              Effect.gen(function* () {
+                fixture.setOnLiveCheck(Effect.void);
+                fixture.setSessionLive(false);
+                const processed = yield* Deferred.make<void>();
+                Queue.offerUnsafe(events, { event: stopped, processed });
+                yield* Deferred.await(processed);
+              }),
+            );
+        });
+        const nextReports = (count: number) =>
+          fixture.service.reports.pipe(
+            Stream.filter((report) => report !== null),
+            Stream.take(count),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+        const deletionReports = yield* nextReports(stop === "race" ? 3 : 2);
+        yield* fixture.activate(
+          Stream.fromQueue(events).pipe(
+            Stream.flatMap(({ event, processed }) =>
+              Stream.succeed(event).pipe(
+                Stream.concat(
+                  // The next pull acknowledges that the listener handled this event.
+                  Stream.fromEffect(
+                    processed === null ? Effect.void : Deferred.succeed(processed, undefined),
+                  ).pipe(Stream.drain),
+                ),
+              ),
+            ),
+          ),
+        );
+        const [, deletionReport, raceReport] = yield* Fiber.join(deletionReports);
+        yield* fixture.service.drain;
+        expect(deletionReport!.threads).toMatchObject([
+          { threadId: "archived-expired", outcome: "removed" },
+        ]);
+        const sessionKept = {
+          path: fixture.worktree,
+          outcome: "kept",
+          reason: "Provider session is still open",
+        };
+        const terminalKept = { path: deletedWorktree, outcome: "kept", reason: "Open terminal" };
+        expect(deletionReport!.entries).toEqual(
+          stop === "live"
+            ? expect.arrayContaining([
+                expect.objectContaining(sessionKept),
+                expect.objectContaining(terminalKept),
+              ])
+            : [expect.objectContaining(sessionKept)],
+        );
+
+        let stopReport = raceReport;
+        if (stop !== "race") {
+          const stopReports = yield* nextReports(2);
+          if (stop !== "unrelated") fixture.setSessionLive(false);
+          Queue.offerUnsafe(events, { event: stopped, processed: null });
+          [, stopReport] = yield* Fiber.join(stopReports);
+          yield* fixture.service.drain;
+        }
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(stop === "unrelated");
+        const removed = { path: fixture.worktree, outcome: "removed" };
+        expect(stopReport!.entries).toEqual(
+          stop === "unrelated"
+            ? [expect.objectContaining(sessionKept)]
+            : stop === "live"
+              ? expect.arrayContaining([
+                  expect.objectContaining(removed),
+                  expect.objectContaining(terminalKept),
+                ])
+              : [expect.objectContaining(removed)],
+        );
+        if (stop !== "unrelated" && stop !== "live")
+          expect(stopReport!.threads).toMatchObject([
+            { threadId: "archived-expired", outcome: "removed" },
+          ]);
+        else expect(stopReport!.threads).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps the archived threads in the report of the sweep a delete by hand requests", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        const due = settled("settled-expired");
+        fixture.setThreads([due]);
+        fixture.setOnDispatch(() => fixture.setThreads([{ ...due, archivedAt: at(0) }]));
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        const first = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* fixture.activate(Stream.fromQueue(events));
+        yield* Fiber.join(first);
+        yield* fixture.service.drain;
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "settled-expired", outcome: "removed" },
+        ]);
+        const followUp = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.drop(1),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const byHand = settled("deleted-by-hand");
+        Queue.offerUnsafe(events, {
+          id: EventId.make("event:delete-by-hand"),
+          type: "thread.deleted",
+          threadId: byHand.id,
+          occurredAt: at(0),
+          payload: { ...byHand, deletedAt: at(0), lastVisitedAt: null },
+        } as OrchestrationV2DomainEvent);
+        yield* Fiber.join(followUp);
+        yield* fixture.service.drain;
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.archive"]);
+        expect((yield* fixture.service.latestReport)?.threads).toMatchObject([
+          { threadId: "settled-expired", outcome: "removed" },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect(
+    "archives or deletes the rest of a sweep only as its rule switched off or lengthened during it allows",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(NOW_MS);
+          const fixture = yield* cleanupFixture(DEFAULT_SERVER_SETTINGS.storageCleanup);
+          let activated = false;
+          const reasons: Array<string | undefined> = [];
+          for (const rule of ["archivedThreadsAfterDays", "settledThreadsAfterDays"] as const) {
+            const settings = (days: number | null) => ({
+              storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, [rule]: days },
+            });
+            const archivedAt = (days: number) =>
+              rule === "archivedThreadsAfterDays" ? at(-days * DAY_MS) : null;
+            for (const changed of [null, 60, 8]) {
+              fixture.setSettings(settings(7));
+              fixture.setThreads([
+                settled(`first-${rule}-${changed}`, {
+                  updatedAt: at(-32 * DAY_MS),
+                  archivedAt: archivedAt(9),
+                }),
+                settled(`second-${rule}-${changed}`, { archivedAt: archivedAt(8) }),
+              ]);
+              fixture.setOnDispatch(() => fixture.setSettings(settings(changed)));
+              const report = activated
+                ? yield* fixture.service.runNow
+                : yield* firstReport(fixture);
+              activated = true;
+              if (changed === 8)
+                reasons.push(...(report.threads ?? []).map((entry) => entry.reason));
+            }
+          }
+          expect(
+            fixture
+              .dispatched()
+              .map((command) => ("threadId" in command ? command.threadId : null)),
+          ).toEqual([
+            "first-archivedThreadsAfterDays-null",
+            "first-archivedThreadsAfterDays-60",
+            "first-archivedThreadsAfterDays-8",
+            "second-archivedThreadsAfterDays-8",
+            "first-settledThreadsAfterDays-null",
+            "first-settledThreadsAfterDays-60",
+            "first-settledThreadsAfterDays-8",
+            "second-settledThreadsAfterDays-8",
+          ]);
+          expect(reasons).toEqual([
+            "Deleted after 7 days archived",
+            "Deleted after 8 days archived",
+            "Archived after 7 days settled",
+            "Archived after 8 days settled",
+          ]);
+        }),
+      ),
+  );
+
+  it.effect.each([
+    { sidebarAutoSettleKeepPullRequests: true },
+    {
+      projectSettingsOverrides: {
+        [ProjectId.make("project-1")]: { sidebarAutoSettleKeepPullRequests: true },
+      },
+    },
+  ])("stops archiving once threads with a pull request are kept during the sweep", (keep) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        fixture.setThreads([
+          settled("review-first", { updatedAt: at(-32 * DAY_MS) }),
+          settled("review-linked", {
+            pullRequests: [
+              {
+                host: "example.test",
+                repository: "owner/repository",
+                number: 1,
+                url: "https://example.test/owner/repository/pull/1",
+                source: "manual",
+                linkedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                snapshot: {
+                  state: "open",
+                  title: "Pull request",
+                  headBranch: "feature",
+                  baseBranch: "main",
+                  isDraft: false,
+                  updatedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                  syncedAt: DateTime.formatIso(at(-40 * DAY_MS)),
+                },
+                stack: null,
+              },
+            ],
+          }),
+        ]);
+        fixture.setOnDispatch(() => fixture.setSettings(keep));
+        yield* firstReport(fixture);
+        expect(
+          fixture.dispatched().map((command) => ("threadId" in command ? command.threadId : null)),
+        ).toEqual(["review-first"]);
+      }),
+    ),
+  );
+
+  it.effect("refreshes a held pull request behind 100 older ones that stay open", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          settledThreadsAfterDays: 30,
+        });
+        fixture.setSettings({ sidebarAutoSettleKeepPullRequests: true });
+        fixture.setThreads(
+          Array.from({ length: 101 }, (_, index) =>
+            settled(`held-${index + 1}`, {
+              updatedAt: at(-(132 - index) * DAY_MS),
+              pullRequests: [
+                {
+                  host: "example.test",
+                  repository: "owner/repository",
+                  number: index + 1,
+                  url: `https://example.test/owner/repository/pull/${index + 1}`,
+                  source: "manual",
+                  linkedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                  snapshot: {
+                    state: "open",
+                    title: "Pull request",
+                    headBranch: `feature-${index + 1}`,
+                    baseBranch: "main",
+                    isDraft: false,
+                    updatedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                    syncedAt: DateTime.formatIso(at(-140 * DAY_MS)),
+                  },
+                  stack: null,
+                },
+              ],
+            }),
+          ),
+        );
+        yield* firstReport(fixture);
+        expect(fixture.requestedPullRequests()).toHaveLength(100);
+        expect(fixture.requestedPullRequests()).not.toContain(101);
+        yield* fixture.service.runNow;
+        expect(fixture.requestedPullRequests().slice(100)).toContain(101);
+        expect(fixture.dispatched()).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("is off by default, then archives the 100 oldest threads a sweep", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture(DEFAULT_SERVER_SETTINGS.storageCleanup);
+        fixture.setThreads(
+          Array.from({ length: 101 }, (_, index) =>
+            settled(`settled-${index}`, { updatedAt: at(-(31 + index) * DAY_MS) }),
+          ),
+        );
+        yield* firstReport(fixture);
+        expect(fixture.dispatched()).toEqual([]);
+
+        fixture.setSettings({
+          storageCleanup: {
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            settledThreadsAfterDays: 30,
+          },
+        });
+        fixture.changeBeforeDispatch([ThreadId.make("settled-100")]);
+        const report = yield* fixture.service.runNow;
+        const archived = fixture
+          .dispatched()
+          .map((command) => ("threadId" in command ? command.threadId : null));
+        expect(archived).toHaveLength(100);
+        expect(archived[0]).toBe("settled-100");
+        expect(archived).not.toContain("settled-0");
+        const entries = report.threads ?? [];
+        expect(entries.filter((entry) => entry.outcome === "removed")).toHaveLength(99);
+        expect(entries.filter((entry) => entry.outcome === "kept")).toMatchObject([
+          { threadId: "settled-100", reason: "Thread settled-100 changed before it was archived." },
+        ]);
+      }),
+    ),
+  );
+});

@@ -302,6 +302,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "storage-threads",
+    title: msg("Settled and archived threads"),
+    to: "/settings/maintenance",
+    scope: "environment-defaults",
+    searchTerms: [
+      msg("automatic archive settled threads delete archived threads old cleanup retention days"),
+    ],
+  },
+  {
     id: "project-defaults",
     title: msg("Project defaults and overrides"),
     to: "/settings/threads",
