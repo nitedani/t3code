@@ -4845,6 +4845,85 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
+  it.effect("keeps a deleted thread in the report once its worktree's session stops", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          archivedThreadsAfterDays: 7,
+          worktreeOnDelete: true,
+        });
+        const archived = settled("archived-expired", {
+          archivedAt: at(-8 * DAY_MS),
+          branch: "feature",
+          worktreePath: fixture.worktree,
+        });
+        fixture.setThreads([archived]);
+        fixture.setOpenSessionCwd(fixture.worktree);
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        fixture.setOnDispatch((command) => {
+          if (command.type !== "thread.delete") return;
+          const deleted = { ...archived, deletedAt: at(0) };
+          fixture.setThreads([]);
+          fixture.setDeletedThreads([deleted]);
+          Queue.offerUnsafe(events, {
+            id: EventId.make("event:auto-delete"),
+            type: "thread.deleted",
+            threadId: archived.id,
+            occurredAt: at(0),
+            payload: { ...deleted, lastVisitedAt: null },
+          } as OrchestrationV2DomainEvent);
+        });
+        const nextReports = (count: number) =>
+          fixture.service.reports.pipe(
+            Stream.filter((report) => report !== null),
+            Stream.take(count),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+        const deletionReports = yield* nextReports(2);
+        yield* fixture.activate(Stream.fromQueue(events));
+        const [, deletionReport] = yield* Fiber.join(deletionReports);
+        yield* fixture.service.drain;
+        expect(deletionReport!.threads).toMatchObject([
+          { threadId: "archived-expired", outcome: "removed" },
+        ]);
+        expect(deletionReport!.entries).toMatchObject([
+          { outcome: "kept", reason: "Provider session is still open" },
+        ]);
+
+        const stopReports = yield* nextReports(2);
+        fixture.setSessionLive(false);
+        Queue.offerUnsafe(events, {
+          id: EventId.make("event:session-stopped"),
+          type: "provider-session.updated",
+          threadId: archived.id,
+          occurredAt: at(0),
+          payload: {
+            id: ProviderSessionId.make("session-1"),
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "stopped",
+            cwd: fixture.worktree,
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: at(-DAY_MS),
+            updatedAt: at(0),
+            lastError: null,
+          },
+        } as OrchestrationV2DomainEvent);
+        const [, stopReport] = yield* Fiber.join(stopReports);
+        yield* fixture.service.drain;
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+        expect(stopReport!.entries).toMatchObject([{ outcome: "removed" }]);
+        expect(stopReport!.threads).toMatchObject([
+          { threadId: "archived-expired", outcome: "removed" },
+        ]);
+      }),
+    ),
+  );
+
   it.effect("keeps the archived threads in the report of the sweep a delete by hand requests", () =>
     runCleanupTest(
       Effect.gen(function* () {

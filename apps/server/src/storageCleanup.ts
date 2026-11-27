@@ -2132,11 +2132,13 @@ const make = Effect.gen(function* () {
   let keptDeletedWorktrees: ReadonlyArray<string> = [];
   let deletions = 0;
   let sweptDeletions = 0;
+  let sessionStopRequested = false;
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
   ) {
     const deletionsAtStart = deletions;
-    const followsDeletions = deletionsAtStart !== sweptDeletions;
+    const followsDeletions = deletionsAtStart !== sweptDeletions || sessionStopRequested;
+    sessionStopRequested = false;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
@@ -2189,7 +2191,8 @@ const make = Effect.gen(function* () {
     // After the worktree rules, which a deletion would otherwise hand a tombstone; its
     // thread.deleted requests the sweep that cleans up after it.
     const threadEntries = yield* retention.retire(now);
-    // The sweeps a deletion requests keep the last run's threads until one finds threads of its own.
+    // The sweeps a deletion or its worktree's session stop requests keep the last run's threads
+    // until one finds threads of its own.
     const reportedThreads =
       followsDeletions && trigger === "automatic" && threadEntries.length === 0
         ? ((yield* SubscriptionRef.get(reportRef))?.threads ?? [])
@@ -2353,11 +2356,15 @@ const make = Effect.gen(function* () {
         }
         if (event.type === "thread.deleted") return requestSweep;
         if (!anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)) return Effect.void;
+        const requestAfterStop = Effect.suspend(() => {
+          sessionStopRequested = true;
+          return requestSweep;
+        });
         return event.type === "provider-session.updated" && event.payload.status === "error"
           ? providerSessions
               .isLive(event.payload.id)
-              .pipe(Effect.flatMap((live) => (live ? Effect.void : requestSweep)))
-          : requestSweep;
+              .pipe(Effect.flatMap((live) => (live ? Effect.void : requestAfterStop)))
+          : requestAfterStop;
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("Storage cleanup event stream failed", { cause }),
