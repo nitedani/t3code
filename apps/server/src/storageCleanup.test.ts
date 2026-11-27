@@ -4845,7 +4845,10 @@ describe("settled and archived thread cleanup", () => {
     ),
   );
 
-  it.effect("keeps a deleted thread in the report once its worktree's session stops", () =>
+  it.effect.each([
+    { stopped: "its worktree's session", related: true },
+    { stopped: "an unrelated session", related: false },
+  ])("keeps a deleted thread in the report only once $stopped stops", ({ related }) =>
     runCleanupTest(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
@@ -4894,18 +4897,18 @@ describe("settled and archived thread cleanup", () => {
         ]);
 
         const stopReports = yield* nextReports(2);
-        fixture.setSessionLive(false);
+        if (related) fixture.setSessionLive(false);
         Queue.offerUnsafe(events, {
           id: EventId.make("event:session-stopped"),
           type: "provider-session.updated",
-          threadId: archived.id,
+          threadId: related ? archived.id : ThreadId.make("unrelated-live-thread"),
           occurredAt: at(0),
           payload: {
-            id: ProviderSessionId.make("session-1"),
+            id: ProviderSessionId.make(related ? "session-1" : "unrelated-session"),
             driver: ProviderDriverKind.make("codex"),
             providerInstanceId: ProviderInstanceId.make("codex"),
             status: "stopped",
-            cwd: fixture.worktree,
+            cwd: related ? fixture.worktree : fixture.repo,
             model: null,
             capabilities: CodexProviderCapabilitiesV2,
             createdAt: at(-DAY_MS),
@@ -4915,11 +4918,18 @@ describe("settled and archived thread cleanup", () => {
         } as OrchestrationV2DomainEvent);
         const [, stopReport] = yield* Fiber.join(stopReports);
         yield* fixture.service.drain;
-        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
-        expect(stopReport!.entries).toMatchObject([{ outcome: "removed" }]);
-        expect(stopReport!.threads).toMatchObject([
-          { threadId: "archived-expired", outcome: "removed" },
+        expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!related);
+        expect(stopReport!.entries).toMatchObject([
+          related
+            ? { outcome: "removed" }
+            : { outcome: "kept", reason: "Provider session is still open" },
         ]);
+        if (related)
+          expect(stopReport!.threads).toMatchObject([
+            { threadId: "archived-expired", outcome: "removed" },
+          ]);
+        else expect(stopReport!.threads).toEqual([]);
       }),
     ),
   );
