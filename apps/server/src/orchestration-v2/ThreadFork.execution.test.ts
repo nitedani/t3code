@@ -1587,6 +1587,47 @@ it.effect("a guarded archive or delete takes a family only as its caller read it
     yield* guarded("thread.delete", "guarded-cleanup-delete", yield* asRead(parentId, sideChatId));
     assert.isNotNull((yield* thread(parentId)).deletedAt);
     assert.isNotNull((yield* thread(sideChatId)).deletedAt);
+
+    const delegatingParentId = ThreadId.make("guarded-cleanup-delegating-parent");
+    const delegatingId = ThreadId.make("guarded-cleanup-delegating");
+    yield* createParent(delegatingParentId);
+    yield* writeParentRun({
+      threadId: delegatingParentId,
+      runId: RunId.make("guarded-cleanup-delegating-parent-run"),
+      ordinal: 1,
+      status: "completed",
+      text: "Parent work",
+      stable: true,
+    });
+    yield* forkSideChat("guarded-cleanup-delegating-fork", delegatingParentId, delegatingId);
+    yield* askSideChat(delegatingId, "guarded-cleanup-delegating-ask");
+    const beforeTask = yield* asRead(delegatingParentId, delegatingId);
+    const run = (yield* orchestrator.getThreadProjection(delegatingId)).runs.at(-1)!;
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      commandId: CommandId.make("guarded-cleanup-delegate"),
+      parentThreadId: delegatingId,
+      parentRunId: run.id,
+      parentNodeId: run.rootNodeId!,
+      task: "Review the changes",
+      modelSelection: forkCases[0]!.modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionWake: "always",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    const taskStarted = yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("guarded-cleanup-archive-task-started"),
+        threadId: delegatingParentId,
+        ifUnchanged: beforeTask,
+      })
+      .pipe(Effect.flip);
+    assert.include(String(taskStarted.cause), "changed since it was read");
+    assert.isNull((yield* thread(delegatingParentId)).archivedAt);
   }).pipe(Effect.provide(forkCases[0]!.layer)),
 );
 
