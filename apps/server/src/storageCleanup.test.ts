@@ -4849,6 +4849,8 @@ describe("settled and archived thread cleanup", () => {
     { stopped: "its worktree's session", stop: "own" },
     { stopped: "an unrelated session", stop: "unrelated" },
     { stopped: "the session that kept a live thread's worktree", stop: "live" },
+    { stopped: "its worktree's session, open under a symlinked path,", stop: "alias" },
+    { stopped: "its worktree's session, between its pass's live check and result,", stop: "race" },
   ] as const)("keeps a deleted thread in the report only once $stopped stops", ({ stop }) =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -4877,7 +4879,16 @@ describe("settled and archived thread cleanup", () => {
         });
         const remaining = stop === "live" ? [live] : [];
         fixture.setThreads([archived, ...remaining]);
-        fixture.setOpenSessionCwd(fixture.worktree);
+        const alias = `${fixture.config.stateDir}/workspace-alias`;
+        if (stop === "alias") {
+          yield* fixture.fs.makeDirectory(fixture.config.stateDir, { recursive: true });
+          yield* fixture.fs.symlink(fixture.config.worktreesDir, alias);
+          expect(yield* fixture.fs.realPath(`${alias}/feature`)).toBe(
+            yield* fixture.fs.realPath(fixture.worktree),
+          );
+        }
+        const sessionCwd = stop === "alias" ? `${alias}/feature` : fixture.worktree;
+        fixture.setOpenSessionCwd(sessionCwd);
         if (stop === "live")
           yield* fixture.setTerminals([
             {
@@ -4894,19 +4905,61 @@ describe("settled and archived thread cleanup", () => {
               updatedAt: DateTime.formatIso(at(0)),
             },
           ]);
-        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        const events = yield* Queue.unbounded<{
+          readonly event: OrchestrationV2DomainEvent;
+          readonly processed: Deferred.Deferred<void> | null;
+        }>();
+        const stopped = {
+          id: EventId.make("event:session-stopped"),
+          type: "provider-session.updated",
+          threadId: {
+            own: archived.id,
+            unrelated: ThreadId.make("unrelated-thread"),
+            live: live.id,
+            alias: archived.id,
+            race: archived.id,
+          }[stop],
+          occurredAt: at(0),
+          payload: {
+            id: ProviderSessionId.make(stop === "unrelated" ? "unrelated-session" : "session-1"),
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "stopped",
+            cwd: stop === "unrelated" ? fixture.repo : sessionCwd,
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: at(-DAY_MS),
+            updatedAt: at(0),
+            lastError: null,
+          },
+        } as OrchestrationV2DomainEvent;
         fixture.setOnDispatch((command) => {
           if (command.type !== "thread.delete") return;
           const deleted = { ...archived, deletedAt: at(0) };
           fixture.setThreads(remaining);
           fixture.setDeletedThreads([deleted]);
           Queue.offerUnsafe(events, {
-            id: EventId.make("event:auto-delete"),
-            type: "thread.deleted",
-            threadId: archived.id,
-            occurredAt: at(0),
-            payload: { ...deleted, lastVisitedAt: null },
-          } as OrchestrationV2DomainEvent);
+            event: {
+              id: EventId.make("event:auto-delete"),
+              type: "thread.deleted",
+              threadId: archived.id,
+              occurredAt: at(0),
+              payload: { ...deleted, lastVisitedAt: null },
+            } as OrchestrationV2DomainEvent,
+            processed: null,
+          });
+          // In the race row, the deletion's pass reads the session live, and it stops and its
+          // event is handled before that pass publishes its result.
+          if (stop === "race")
+            fixture.setOnLiveCheck(
+              Effect.gen(function* () {
+                fixture.setOnLiveCheck(Effect.void);
+                fixture.setSessionLive(false);
+                const processed = yield* Deferred.make<void>();
+                Queue.offerUnsafe(events, { event: stopped, processed });
+                yield* Deferred.await(processed);
+              }),
+            );
         });
         const nextReports = (count: number) =>
           fixture.service.reports.pipe(
@@ -4915,9 +4968,22 @@ describe("settled and archived thread cleanup", () => {
             Stream.runCollect,
             Effect.forkChild,
           );
-        const deletionReports = yield* nextReports(2);
-        yield* fixture.activate(Stream.fromQueue(events));
-        const [, deletionReport] = yield* Fiber.join(deletionReports);
+        const deletionReports = yield* nextReports(stop === "race" ? 3 : 2);
+        yield* fixture.activate(
+          Stream.fromQueue(events).pipe(
+            Stream.flatMap(({ event, processed }) =>
+              Stream.succeed(event).pipe(
+                Stream.concat(
+                  // The next pull acknowledges that the listener handled this event.
+                  Stream.fromEffect(
+                    processed === null ? Effect.void : Deferred.succeed(processed, undefined),
+                  ).pipe(Stream.drain),
+                ),
+              ),
+            ),
+          ),
+        );
+        const [, deletionReport, raceReport] = yield* Fiber.join(deletionReports);
         yield* fixture.service.drain;
         expect(deletionReport!.threads).toMatchObject([
           { threadId: "archived-expired", outcome: "removed" },
@@ -4937,46 +5003,28 @@ describe("settled and archived thread cleanup", () => {
             : [expect.objectContaining(sessionKept)],
         );
 
-        const stopReports = yield* nextReports(2);
-        if (stop !== "unrelated") fixture.setSessionLive(false);
-        Queue.offerUnsafe(events, {
-          id: EventId.make("event:session-stopped"),
-          type: "provider-session.updated",
-          threadId: {
-            own: archived.id,
-            unrelated: ThreadId.make("unrelated-thread"),
-            live: live.id,
-          }[stop],
-          occurredAt: at(0),
-          payload: {
-            id: ProviderSessionId.make(stop === "unrelated" ? "unrelated-session" : "session-1"),
-            driver: ProviderDriverKind.make("codex"),
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            status: "stopped",
-            cwd: stop === "unrelated" ? fixture.repo : fixture.worktree,
-            model: null,
-            capabilities: CodexProviderCapabilitiesV2,
-            createdAt: at(-DAY_MS),
-            updatedAt: at(0),
-            lastError: null,
-          },
-        } as OrchestrationV2DomainEvent);
-        const [, stopReport] = yield* Fiber.join(stopReports);
-        yield* fixture.service.drain;
+        let stopReport = raceReport;
+        if (stop !== "race") {
+          const stopReports = yield* nextReports(2);
+          if (stop !== "unrelated") fixture.setSessionLive(false);
+          Queue.offerUnsafe(events, { event: stopped, processed: null });
+          [, stopReport] = yield* Fiber.join(stopReports);
+          yield* fixture.service.drain;
+        }
         expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(stop === "unrelated");
         const removed = { path: fixture.worktree, outcome: "removed" };
         expect(stopReport!.entries).toEqual(
-          {
-            own: [expect.objectContaining(removed)],
-            unrelated: [expect.objectContaining(sessionKept)],
-            live: expect.arrayContaining([
-              expect.objectContaining(removed),
-              expect.objectContaining(terminalKept),
-            ]),
-          }[stop],
+          stop === "unrelated"
+            ? [expect.objectContaining(sessionKept)]
+            : stop === "live"
+              ? expect.arrayContaining([
+                  expect.objectContaining(removed),
+                  expect.objectContaining(terminalKept),
+                ])
+              : [expect.objectContaining(removed)],
         );
-        if (stop === "own")
+        if (stop !== "unrelated" && stop !== "live")
           expect(stopReport!.threads).toMatchObject([
             { threadId: "archived-expired", outcome: "removed" },
           ]);
