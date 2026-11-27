@@ -16237,16 +16237,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const { subagents } = yield* projectionStore
               .getThreadRecords(threadId, ["subagents"])
               .pipe(mapDispatchError(command));
-            if (hasRunningDelegatedTasks(subagents)) {
-              // A guarded archive takes the whole family or nothing.
-              if (command.ifUnchanged !== undefined)
-                return yield* new OrchestratorDispatchError({
-                  commandId: command.commandId,
-                  commandType: command.type,
-                  cause: `Side chat ${threadId} of thread ${command.threadId} has running delegated tasks.`,
-                });
-              continue;
-            }
+            if (hasRunningDelegatedTasks(subagents)) continue;
           }
           yield* dispatchThreadMutation(
             {

@@ -1742,20 +1742,6 @@ it.effect(
 
       assert.deepStrictEqual(yield* retire, []);
       assert.deepStrictEqual(yield* archived, [false, false]);
-      const guarded = yield* orchestrator
-        .dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make("retention-delegating-guarded-archive"),
-          threadId: parentId,
-          ifUnchanged: (yield* shells).flatMap((thread) =>
-            thread.id === parentId || thread.id === sideChatId
-              ? [{ threadId: thread.id, updatedAt: thread.updatedAt }]
-              : [],
-          ),
-        })
-        .pipe(Effect.flip);
-      assert.include(String(guarded.cause), "has running delegated tasks");
-      assert.deepStrictEqual(yield* archived, [false, false]);
 
       yield* task("completed");
       assert.deepStrictEqual(yield* retire, [[parentId, "removed"]]);
