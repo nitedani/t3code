@@ -945,13 +945,13 @@ function StorageRetentionRow({
     targets.some((target) => target.settings.storageCleanup[setting] !== value);
   const settledStatus = useDebouncedValue(`${targetIdsKey}:${mixed}`, 300);
   const operable = useEnvironmentsWithScope(targets, AuthOrchestrationOperateScope);
-  const offOnly =
-    requiredScopesForServerSettingsPatch({ storageCleanup: { [setting]: 1 } }).includes(
-      AuthOrchestrationOperateScope,
-    ) && !targets.every((target) => operable.has(target.environmentId));
-  // Switching off needs no task operation, so it reaches a rule that is on anywhere selected.
+  const needsOperation = requiredScopesForServerSettingsPatch({
+    storageCleanup: { [setting]: 1 },
+  }).includes(AuthOrchestrationOperateScope);
+  const offOnly = needsOperation && !targets.every((target) => operable.has(target.environmentId));
+  // A thread rule on anywhere selected shows on, so switching it off reaches every machine.
   const shownValue =
-    offOnly && value === null
+    needsOperation && value === null
       ? (targets.find((target) => target.settings.storageCleanup[setting] !== null)?.settings
           .storageCleanup[setting] ?? null)
       : value;

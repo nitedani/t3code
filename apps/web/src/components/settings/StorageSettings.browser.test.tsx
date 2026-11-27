@@ -374,25 +374,35 @@ it("offers thread rules only where every selected machine supports them", async 
   expect(screen.container.textContent).not.toContain("Delete archived threads");
 });
 
-it("switches a thread rule off that only a machine shown second has on", async () => {
-  setup();
-  state.operable = ["env-a"];
-  state.targets = [null, 7].map((archivedThreadsAfterDays, index) => ({
-    environmentId: ["env-a", "env-b"][index]!,
-    settings: {
-      ...state.settings,
-      storageCleanup: { ...state.settings.storageCleanup, archivedThreadsAfterDays },
-    },
-  }));
-  state.settings = state.targets[0]!.settings;
-  await using screen = await render(panel());
-  const deleteRule = screen.getByRole("switch", { name: "Delete archived threads" });
-  await expect.element(deleteRule).toBeEnabled();
-  await expect.element(deleteRule).toBeChecked();
-  await expect.element(screen.getByLabelText("Delete archived threads in days")).toBeDisabled();
-  await userEvent.click(deleteRule);
-  expect(saves()).toEqual([{ archivedThreadsAfterDays: null }]);
-});
+it.each([
+  ["Archive settled threads", "settledThreadsAfterDays", ["env-a"]],
+  ["Archive settled threads", "settledThreadsAfterDays", ["env-a", "env-b"]],
+  ["Delete archived threads", "archivedThreadsAfterDays", ["env-a"]],
+  ["Delete archived threads", "archivedThreadsAfterDays", ["env-a", "env-b"]],
+] as const)(
+  "switches %s off that only a machine shown second has on (%s, task operation on %j)",
+  async (title, setting, operable) => {
+    setup();
+    state.operable = [...operable];
+    state.targets = [null, 7].map((days, index) => ({
+      environmentId: ["env-a", "env-b"][index]!,
+      settings: {
+        ...state.settings,
+        storageCleanup: { ...state.settings.storageCleanup, [setting]: days },
+      },
+    }));
+    state.settings = state.targets[0]!.settings;
+    await using screen = await render(panel());
+    const threadRule = screen.getByRole("switch", { name: title });
+    await expect.element(threadRule).toBeEnabled();
+    await expect.element(threadRule).toBeChecked();
+    const days = screen.getByLabelText(`${title} in days`);
+    if (operable.length === 2) await expect.element(days).toBeEnabled();
+    else await expect.element(days).toBeDisabled();
+    await userEvent.click(threadRule);
+    expect(saves()).toEqual([{ [setting]: null }]);
+  },
+);
 
 it.each([
   [rule, "browserArtifactsAfterDays"],
