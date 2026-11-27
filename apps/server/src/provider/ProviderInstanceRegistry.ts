@@ -295,7 +295,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
       driverKind: entry.driver,
       instanceId,
       displayName: entry.displayName,
-      defaultDisplayName: defaultSnapshotDisplayName,
+      defaultDisplayName: driver === undefined ? undefined : (defaultSnapshotDisplayName ?? null),
       accentColor: entry.accentColor,
       reason,
     });

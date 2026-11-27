@@ -12,8 +12,11 @@ export interface UnavailableProviderSnapshotInput {
   readonly driverKind: ProviderDriverKind | string;
   readonly instanceId: ProviderInstanceId;
   readonly displayName?: string | undefined;
-  /** The label a live snapshot of this driver reports when the settings name none. */
-  readonly defaultDisplayName?: string | undefined;
+  /**
+   * The name a live snapshot of this driver reports when the settings set none: null when it
+   * reports none, undefined when this build has no such driver (the driver id stands in).
+   */
+  readonly defaultDisplayName?: string | null | undefined;
   readonly accentColor?: string | undefined;
   readonly reason: string;
   readonly checkedAt?: string;
@@ -26,11 +29,19 @@ export const buildUnavailableProviderSnapshot = Effect.fn(
 )(function* (input: UnavailableProviderSnapshotInput): Effect.fn.Return<ServerProvider> {
   const checkedAt = input.checkedAt ?? (yield* nowIso);
   const customDisplayName = input.displayName?.trim();
-  const displayName = customDisplayName || input.defaultDisplayName || (input.driverKind as string);
+  const displayName =
+    customDisplayName ||
+    (input.defaultDisplayName === null
+      ? undefined
+      : input.defaultDisplayName || (input.driverKind as string));
 
   // No driver ran, so its setup capabilities are still unknown.
-  const { setup: _setup, ...base } = buildServerProvider({
-    presentation: { displayName },
+  const {
+    setup: _setup,
+    displayName: _unnamed,
+    ...base
+  } = buildServerProvider({
+    presentation: { displayName: "" },
     enabled: false,
     checkedAt,
     models: [],
@@ -47,6 +58,7 @@ export const buildUnavailableProviderSnapshot = Effect.fn(
   return {
     ...base,
     instanceId: input.instanceId,
+    ...(displayName ? { displayName } : {}),
     ...(customDisplayName ? { hasCustomDisplayName: true } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     driver:

@@ -23,6 +23,7 @@ import {
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import { OpenCodeSettings } from "@t3tools/provider-opencode/settings";
 import { PiDriver } from "@t3tools/provider-pi/server";
+import { AcpRegistryDriver } from "@t3tools/provider-acp-registry/server";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as DateTime from "effect/DateTime";
@@ -452,16 +453,32 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
 
   it.effect("labels an unnamed unavailable instance with its driver's label, as a live one", () =>
     Effect.gen(function* () {
-      const instanceId = ProviderInstanceId.make("claude_2");
+      const claudeId = ProviderInstanceId.make("claude_2");
+      const acpId = ProviderInstanceId.make("kimi_2");
       const { registry } = yield* makeProviderInstanceRegistry({
-        drivers: [ClaudeDriver],
-        configMap: { [instanceId]: { driver: ProviderDriverKind.make("claudeAgent") } },
+        // A blocked instance never starts, so only the ACP driver's metadata is read.
+        drivers: [
+          ClaudeDriver,
+          {
+            ...ClaudeDriver,
+            driverKind: AcpRegistryDriver.driverKind,
+            metadata: AcpRegistryDriver.metadata,
+          },
+        ],
+        configMap: {
+          [claudeId]: { driver: ProviderDriverKind.make("claudeAgent") },
+          [acpId]: { driver: ProviderDriverKind.make("acpRegistry") },
+        },
         blockedReason: () => "Blocked by policy.",
       });
 
-      const [unavailable] = yield* registry.listUnavailable;
-      expect(unavailable?.displayName).toBe("Claude");
-      expect(unavailable?.hasCustomDisplayName).toBeUndefined();
+      const unavailable = new Map(
+        (yield* registry.listUnavailable).map((snapshot) => [snapshot.instanceId, snapshot]),
+      );
+      expect(unavailable.get(claudeId)?.displayName).toBe("Claude");
+      expect(unavailable.get(claudeId)?.hasCustomDisplayName).toBeUndefined();
+      // A live ACP snapshot names no instance, so the client numbers it from its id ("Kimi 2").
+      expect(unavailable.get(acpId)?.displayName).toBeUndefined();
     }).pipe(Effect.provide(layerTest)),
   );
 
