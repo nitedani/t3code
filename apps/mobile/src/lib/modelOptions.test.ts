@@ -336,6 +336,22 @@ describe("mobile model options", () => {
       "Claude",
       "Claude 2",
     ]);
+
+    const named = {
+      providers: config.providers.map((provider) =>
+        provider.instanceId === "claude_2" ? { ...provider, hasCustomDisplayName: true } : provider,
+      ),
+    } as unknown as ServerConfig;
+    const namedOptions = buildModelOptions(named, selection, undefined, null);
+    expect(namedOptions.map((option) => option.providerLabel)).toEqual([
+      "Claude",
+      "Claude",
+      "Claude",
+    ]);
+    expect(groupByProvider(namedOptions).map((group) => group.providerKey)).toEqual([
+      "claudeAgent",
+      "claude_2",
+    ]);
   });
 
   it("takes an account's name and whether it was set from the same source", () => {
