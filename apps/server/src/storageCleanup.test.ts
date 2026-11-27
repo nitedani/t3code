@@ -4846,9 +4846,10 @@ describe("settled and archived thread cleanup", () => {
   );
 
   it.effect.each([
-    { stopped: "its worktree's session", related: true },
-    { stopped: "an unrelated session", related: false },
-  ])("keeps a deleted thread in the report only once $stopped stops", ({ related }) =>
+    { stopped: "its worktree's session", stop: "own" },
+    { stopped: "an unrelated session", stop: "unrelated" },
+    { stopped: "the session that kept a live thread's worktree", stop: "live" },
+  ] as const)("keeps a deleted thread in the report only once $stopped stops", ({ stop }) =>
     runCleanupTest(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
@@ -4856,19 +4857,48 @@ describe("settled and archived thread cleanup", () => {
           ...DEFAULT_SERVER_SETTINGS.storageCleanup,
           archivedThreadsAfterDays: 7,
           worktreeOnDelete: true,
+          worktreeAfterDays: stop === "live" ? 8 : null,
         });
+        // In the live row, the deleted thread's worktree waits on a terminal while the live
+        // thread's worktree is kept for its open session.
+        const deletedWorktree =
+          stop === "live" ? `${fixture.config.worktreesDir}/other` : fixture.worktree;
+        if (stop === "live")
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "other", deletedWorktree]);
         const archived = settled("archived-expired", {
           archivedAt: at(-8 * DAY_MS),
+          branch: stop === "live" ? "other" : "feature",
+          worktreePath: deletedWorktree,
+        });
+        const live = shell({
+          id: ThreadId.make("live-thread"),
           branch: "feature",
           worktreePath: fixture.worktree,
         });
-        fixture.setThreads([archived]);
+        const remaining = stop === "live" ? [live] : [];
+        fixture.setThreads([archived, ...remaining]);
         fixture.setOpenSessionCwd(fixture.worktree);
+        if (stop === "live")
+          yield* fixture.setTerminals([
+            {
+              threadId: archived.id,
+              terminalId: "terminal-1",
+              cwd: deletedWorktree,
+              worktreePath: deletedWorktree,
+              status: "running",
+              pid: 1,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "Terminal",
+              updatedAt: DateTime.formatIso(at(0)),
+            },
+          ]);
         const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
         fixture.setOnDispatch((command) => {
           if (command.type !== "thread.delete") return;
           const deleted = { ...archived, deletedAt: at(0) };
-          fixture.setThreads([]);
+          fixture.setThreads(remaining);
           fixture.setDeletedThreads([deleted]);
           Queue.offerUnsafe(events, {
             id: EventId.make("event:auto-delete"),
@@ -4892,23 +4922,38 @@ describe("settled and archived thread cleanup", () => {
         expect(deletionReport!.threads).toMatchObject([
           { threadId: "archived-expired", outcome: "removed" },
         ]);
-        expect(deletionReport!.entries).toMatchObject([
-          { outcome: "kept", reason: "Provider session is still open" },
-        ]);
+        const sessionKept = {
+          path: fixture.worktree,
+          outcome: "kept",
+          reason: "Provider session is still open",
+        };
+        const terminalKept = { path: deletedWorktree, outcome: "kept", reason: "Open terminal" };
+        expect(deletionReport!.entries).toEqual(
+          stop === "live"
+            ? expect.arrayContaining([
+                expect.objectContaining(sessionKept),
+                expect.objectContaining(terminalKept),
+              ])
+            : [expect.objectContaining(sessionKept)],
+        );
 
         const stopReports = yield* nextReports(2);
-        if (related) fixture.setSessionLive(false);
+        if (stop !== "unrelated") fixture.setSessionLive(false);
         Queue.offerUnsafe(events, {
           id: EventId.make("event:session-stopped"),
           type: "provider-session.updated",
-          threadId: related ? archived.id : ThreadId.make("unrelated-live-thread"),
+          threadId: {
+            own: archived.id,
+            unrelated: ThreadId.make("unrelated-thread"),
+            live: live.id,
+          }[stop],
           occurredAt: at(0),
           payload: {
-            id: ProviderSessionId.make(related ? "session-1" : "unrelated-session"),
+            id: ProviderSessionId.make(stop === "unrelated" ? "unrelated-session" : "session-1"),
             driver: ProviderDriverKind.make("codex"),
             providerInstanceId: ProviderInstanceId.make("codex"),
             status: "stopped",
-            cwd: related ? fixture.worktree : fixture.repo,
+            cwd: stop === "unrelated" ? fixture.repo : fixture.worktree,
             model: null,
             capabilities: CodexProviderCapabilitiesV2,
             createdAt: at(-DAY_MS),
@@ -4919,13 +4964,19 @@ describe("settled and archived thread cleanup", () => {
         const [, stopReport] = yield* Fiber.join(stopReports);
         yield* fixture.service.drain;
         expect(fixture.dispatched().map((command) => command.type)).toEqual(["thread.delete"]);
-        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!related);
-        expect(stopReport!.entries).toMatchObject([
-          related
-            ? { outcome: "removed" }
-            : { outcome: "kept", reason: "Provider session is still open" },
-        ]);
-        if (related)
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(stop === "unrelated");
+        const removed = { path: fixture.worktree, outcome: "removed" };
+        expect(stopReport!.entries).toEqual(
+          {
+            own: [expect.objectContaining(removed)],
+            unrelated: [expect.objectContaining(sessionKept)],
+            live: expect.arrayContaining([
+              expect.objectContaining(removed),
+              expect.objectContaining(terminalKept),
+            ]),
+          }[stop],
+        );
+        if (stop === "own")
           expect(stopReport!.threads).toMatchObject([
             { threadId: "archived-expired", outcome: "removed" },
           ]);

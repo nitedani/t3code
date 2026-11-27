@@ -113,7 +113,6 @@ const SETTLE_SCRIPT_GRACE_MS = 60_000;
 const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-const SESSION_OPEN = "provider session is still open";
 const REPORT_ENTRY_LIMIT = 200;
 const isGitCommandError = Schema.is(GitCommandError);
 const errorCode = (error: PlatformError) =>
@@ -1612,7 +1611,7 @@ const make = Effect.gen(function* () {
               (yield* occupies(guardedPaths, session.cwd)) &&
               (yield* providerSessions.isLive(session.id))
             )
-              return waitForStop(SESSION_OPEN);
+              return waitForStop("provider session is still open");
           }
           return null;
         });
@@ -2131,6 +2130,12 @@ const make = Effect.gen(function* () {
   // A deletion stays pending until a sweep that started after it finishes.
   let deletedWorktreeWaits = true;
   let keptDeletedWorktrees: ReadonlyArray<string> = [];
+  const inKeptDeletedWorktree = (path: string) => {
+    const cwd = pathKey(path);
+    return keptDeletedWorktrees.some(
+      (worktreePath) => pathKey(worktreePath) === cwd || inside(worktreePath, cwd),
+    );
+  };
   let deletions = 0;
   let sweptDeletions = 0;
   let sessionStopRequested = false;
@@ -2346,35 +2351,20 @@ const make = Effect.gen(function* () {
           (event.payload.status !== "stopped" && event.payload.status !== "error")
         )
           return Effect.void;
-        else if (!deletedWorktreeWaits && deletions === sweptDeletions) {
-          const cwd = pathKey(event.payload.cwd);
-          if (
-            !keptDeletedWorktrees.some(
-              (worktreePath) => pathKey(worktreePath) === cwd || inside(worktreePath, cwd),
-            )
-          )
-            return Effect.void;
-        }
+        else if (
+          !deletedWorktreeWaits &&
+          deletions === sweptDeletions &&
+          !inKeptDeletedWorktree(event.payload.cwd)
+        )
+          return Effect.void;
         if (event.type !== "provider-session.updated") return requestSweep;
         if (!anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)) return Effect.void;
-        const cwd = pathKey(event.payload.cwd);
-        // Only the stop of a session that kept a deleted thread's worktree continues its cleanup.
-        const requestAfterStop = SubscriptionRef.get(reportRef).pipe(
-          Effect.flatMap((report) => {
-            if (
-              report?.entries.some(
-                (entry) =>
-                  entry.kind === "worktree" &&
-                  entry.outcome === "kept" &&
-                  entry.reason === sentence(SESSION_OPEN) &&
-                  entry.path !== null &&
-                  (pathKey(entry.path) === cwd || inside(entry.path, cwd)),
-              )
-            )
-              sessionStopRequested = true;
-            return requestSweep;
-          }),
-        );
+        // Only a stop inside a deleted thread's kept worktree continues that deletion's cleanup.
+        const continuesDeletion = inKeptDeletedWorktree(event.payload.cwd);
+        const requestAfterStop = Effect.suspend(() => {
+          if (continuesDeletion) sessionStopRequested = true;
+          return requestSweep;
+        });
         return event.payload.status === "error"
           ? providerSessions
               .isLive(event.payload.id)
