@@ -622,6 +622,17 @@ describe("mobile model options", () => {
       expect(isModelSelectionUnavailable(null, selection, null)).toBe(false);
       expect(buildModelOptions(null, selection, undefined, null)[0]?.selection).toBe(selection);
       expect(buildModelOptions(null, selection, undefined, null)[0]?.isUnavailable).not.toBe(true);
+      expect(buildModelOptions(null, selection, undefined, null)[0]?.providerLabel).toBe(
+        selection.instanceId,
+      );
+      for (const [instanceId, label] of [
+        ["codex", "Codex"],
+        ["claudeAgent", "Claude"],
+        ["pi", "Pi"],
+      ] as const) {
+        const saved = { instanceId: ProviderInstanceId.make(instanceId), model: "saved" };
+        expect(buildModelOptions(null, saved, undefined, null)[0]?.providerLabel).toBe(label);
+      }
       expect(isModelSelectionUnavailable(unknownConfig, selection, null)).toBe(false);
       expect(resolveSelectableModelSelection(unknownConfig, selection, null)).toBeNull();
     });

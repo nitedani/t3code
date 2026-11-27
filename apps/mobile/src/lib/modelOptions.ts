@@ -495,7 +495,12 @@ export function buildModelOptions(
         ...(shortName ? { shortName } : {}),
         subtitle: model?.subProvider ?? "",
         providerKey: fallbackModelSelection.instanceId,
-        providerLabel: providerBadge?.displayName ?? fallbackModelSelection.instanceId,
+        providerLabel:
+          providerBadge?.displayName ??
+          providerDisplayLabel({
+            driver: fallbackModelSelection.instanceId,
+            instanceId: fallbackModelSelection.instanceId,
+          }),
         providerDriver,
         providerBadge,
         isDefault: false,
