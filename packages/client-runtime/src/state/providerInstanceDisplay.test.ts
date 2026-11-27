@@ -1,15 +1,46 @@
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   normalizeProviderAccentColor,
   providerAccentForegroundColor,
   providerInstanceInitials,
+  resolveProviderInstanceDisplayName,
   shouldShowInstanceBadge,
 } from "./providerInstanceDisplay.ts";
 
 const codex = ProviderDriverKind.make("codex");
 const acpRegistry = ProviderDriverKind.make("acpRegistry");
+const claudeAgent = ProviderDriverKind.make("claudeAgent");
+
+describe("resolveProviderInstanceDisplayName", () => {
+  it("shows a name the settings set as written, even when it is the driver's label", () => {
+    expect(
+      resolveProviderInstanceDisplayName({
+        instanceId: ProviderInstanceId.make("claude_2"),
+        driver: claudeAgent,
+        displayName: "Claude",
+        hasCustomDisplayName: true,
+      }),
+    ).toBe("Claude");
+  });
+
+  it("tells an unnamed instance from the default one by its id", () => {
+    const unnamed = { driver: claudeAgent, displayName: "Claude" };
+    expect(
+      resolveProviderInstanceDisplayName({
+        ...unnamed,
+        instanceId: ProviderInstanceId.make("claude_2"),
+      }),
+    ).toBe("Claude 2");
+    expect(
+      resolveProviderInstanceDisplayName({
+        ...unnamed,
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+      }),
+    ).toBe("Claude");
+  });
+});
 
 describe("providerInstanceInitials", () => {
   it("treats punctuation and camel-case humps as word breaks but keeps apostrophes between letters", () => {

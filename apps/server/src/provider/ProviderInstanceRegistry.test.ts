@@ -397,13 +397,14 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       });
       const initial = yield* registry.getInstance(instanceId);
       const before = yield* initial!.snapshot.getSnapshot;
-      expect(before.displayName).toBe("My Pi account");
+      expect(before).toMatchObject({ displayName: "My Pi account", hasCustomDisplayName: true });
 
       yield* mutator.reconcile({ [instanceId]: entry });
 
       const updated = yield* registry.getInstance(instanceId);
       const after = yield* updated!.snapshot.getSnapshot;
       expect(after.displayName).toBe("Pi");
+      expect(after.hasCustomDisplayName).toBeUndefined();
     }).pipe(Effect.provide(layerTest)),
   );
 

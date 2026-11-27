@@ -1125,6 +1125,7 @@ export const layer = Layer.effect(
               const previous = published.get(instance.instanceId);
               if (
                 previous?.displayName !== provider.displayName ||
+                previous?.hasCustomDisplayName !== provider.hasCustomDisplayName ||
                 previous?.accentColor !== provider.accentColor
               ) {
                 yield* syncProvider(provider);

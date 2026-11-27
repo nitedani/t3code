@@ -97,6 +97,8 @@ const withLivePresentation = (
       if (stamped) next[key] = stamped;
       else delete next[key];
     }
+    if (current.displayName) next.hasCustomDisplayName = true;
+    else delete next.hasCustomDisplayName;
     return next;
   };
   const { snapshot, snapshotForCwd } = instance;

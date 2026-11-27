@@ -14,9 +14,10 @@ function humanizeSlug(slug: string): string {
 }
 
 export function resolveProviderInstanceDisplayName(
-  snapshot: Pick<ServerProvider, "instanceId" | "driver" | "displayName">,
+  snapshot: Pick<ServerProvider, "instanceId" | "driver" | "displayName" | "hasCustomDisplayName">,
 ): string {
   const trimmedSnapshotName = snapshot.displayName?.trim();
+  if (trimmedSnapshotName && snapshot.hasCustomDisplayName) return trimmedSnapshotName;
   const kindLabel = PROVIDER_DISPLAY_NAMES[snapshot.driver] ?? humanizeSlug(snapshot.driver);
   if (trimmedSnapshotName && trimmedSnapshotName !== kindLabel) return trimmedSnapshotName;
   if (snapshot.instanceId !== defaultInstanceIdForDriver(snapshot.driver)) {
