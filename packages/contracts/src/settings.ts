@@ -1358,6 +1358,14 @@ export const StorageCleanupReportEntry = Schema.Struct({
   files: Schema.NullOr(Schema.Number).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 });
 export type StorageCleanupReportEntry = typeof StorageCleanupReportEntry.Type;
+export const StorageCleanupThreadEntry = Schema.Struct({
+  outcome: StorageCleanupReportEntry.fields.outcome,
+  reason: Schema.String,
+  projectPath: Schema.NullOr(Schema.String),
+  threadId: Schema.NullOr(ThreadId),
+  threadTitle: Schema.NullOr(Schema.String),
+});
+export type StorageCleanupThreadEntry = typeof StorageCleanupThreadEntry.Type;
 export const StorageCleanupReport = Schema.Struct({
   trigger: Schema.Literals(["automatic", "manual"]),
   startedAt: Schema.String,
@@ -1366,6 +1374,8 @@ export const StorageCleanupReport = Schema.Struct({
   counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
   omittedCount: Schema.Number,
   bytesFreed: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** Outside `entries` and `counts`, so clients that predate thread cleanup still decode the report. */
+  threads: Schema.optionalKey(Schema.Array(StorageCleanupThreadEntry)),
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 
@@ -1384,6 +1394,14 @@ export const StorageCleanupSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Counted from the thread's last update or snooze ending; unarchiving counts as an update. */
+  settledThreadsAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Applies to archived threads, including ones archived by hand. */
+  archivedThreadsAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
@@ -1903,6 +1921,8 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      settledThreadsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      archivedThreadsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
@@ -2068,6 +2088,14 @@ function carriesProjectScripts(patch: ServerSettingsPatch): boolean {
   );
 }
 
+/** With a thread retention rule on, the host archives and deletes threads with no one asking. */
+function setsThreadRetention(patch: ServerSettingsPatch): boolean {
+  return (
+    patch.storageCleanup?.settledThreadsAfterDays != null ||
+    patch.storageCleanup?.archivedThreadsAfterDays != null
+  );
+}
+
 export function requiredScopesForServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ReadonlyArray<AuthEnvironmentScope> {
@@ -2100,8 +2128,11 @@ export function requiredScopesForServerSettingsPatch(
     ...(changesSettings || (!changesProviders && !changesAccess) ? [AuthSettingsWriteScope] : []),
     ...(changesProviders ? [AuthProvidersManageScope] : []),
     ...(changesAccess ? [AuthAccessWriteScope] : []),
-    // Saving a script is choosing a command for the host to run, wherever the patch carries it.
-    ...(carriesProjectScripts(patch) ? [AuthOrchestrationOperateScope] : []),
+    // Saving a script or a thread retention age chooses what the host does with no one asking,
+    // wherever the patch carries it.
+    ...(carriesProjectScripts(patch) || setsThreadRetention(patch)
+      ? [AuthOrchestrationOperateScope]
+      : []),
   ];
 }
 

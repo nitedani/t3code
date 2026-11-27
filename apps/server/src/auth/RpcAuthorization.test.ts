@@ -608,7 +608,7 @@ describe("settings mutation authorization", () => {
       }),
   );
 
-  it.effect("saving project scripts needs task operation as well as the settings grant", () =>
+  it.effect("saving project scripts or a thread retention age needs task operation as well", () =>
     Effect.gen(function* () {
       const projectId = ProjectId.make("project-1");
       const scripts = [
@@ -641,6 +641,8 @@ describe("settings mutation authorization", () => {
         { defaultProjectScripts: scripts },
         { projectScriptOverrides: { [projectId]: scripts } },
         { projectSettingsOverrides: { [projectId]: { defaultProjectScripts: scripts } } },
+        { storageCleanup: { settledThreadsAfterDays: 30 } },
+        { storageCleanup: { archivedThreadsAfterDays: 7 } },
       ];
 
       const settingsOnly = yield* update([AuthSettingsWriteScope]);
@@ -656,6 +658,7 @@ describe("settings mutation authorization", () => {
           defaultAutoPull: true,
           projectScriptOverrides: { [projectId]: null },
           projectSettingsOverrides: { [projectId]: { defaultAutoPull: true } },
+          storageCleanup: { settledThreadsAfterDays: null, archivedThreadsAfterDays: null },
         },
       });
       expect(settingsOnly.handled()).toBe(1);
