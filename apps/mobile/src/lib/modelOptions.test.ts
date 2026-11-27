@@ -313,6 +313,31 @@ describe("mobile model options", () => {
     ).toBe(false);
   });
 
+  it("labels catalog groups, filters and saved fallbacks with the account's own name", () => {
+    const config = {
+      providers: ["claudeAgent", "claude_2"].map((instanceId) => ({
+        instanceId,
+        driver: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [{ slug: "test", name: "Test", capabilities: null }],
+      })),
+    } as unknown as ServerConfig;
+    const selection = { instanceId: ProviderInstanceId.make("claude_2"), model: "saved" };
+    const options = buildModelOptions(config, selection, undefined, null);
+    expect(options.map((option) => option.providerLabel)).toEqual([
+      "Claude",
+      "Claude 2",
+      "Claude 2",
+    ]);
+    expect(groupByProvider(options).map((group) => group.providerLabel)).toEqual([
+      "Claude",
+      "Claude 2",
+    ]);
+  });
+
   it("takes an account's name and whether it was set from the same source", () => {
     const provider = {
       instanceId: "claude_2",
