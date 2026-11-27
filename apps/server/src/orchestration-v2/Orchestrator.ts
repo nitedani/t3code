@@ -1970,6 +1970,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .findThread(threadId)
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
+  const refuseIfChanged = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" | "thread.delete" }>,
+    takes: ReadonlyArray<ThreadId>,
+  ) {
+    if (command.ifUnchanged === undefined) return;
+    const asRead = new Map(
+      command.ifUnchanged.map((read) => [read.threadId, DateTime.toEpochMillis(read.updatedAt)]),
+    );
+    for (const threadId of takes) {
+      const thread = yield* findThread(threadId);
+      if (thread !== null && asRead.get(threadId) === DateTime.toEpochMillis(thread.updatedAt))
+        continue;
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} or a side chat changed since it was read.`,
+      });
+    }
+  });
+
   /** Side chats live inside their parent, so deleting or archiving the parent takes them too. */
   const liveSideChatIds = Effect.fn("Orchestrator.liveSideChatIds")(
     function* (threadId: ThreadId) {
@@ -16233,6 +16253,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
           );
         });
+        yield* refuseIfChanged(command, [command.threadId, ...sideChatIds]);
         // Checked under the thread lock: a message sent since the client looked keeps the thread.
         if (command.onlyIfUnused === true) {
           const usage = yield* projectionStore
@@ -16269,6 +16290,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       case "thread.archive":
       case "thread.unarchive": {
+        if (command.type === "thread.archive" && command.ifUnchanged !== undefined) {
+          const unarchivedSideChatIds: Array<ThreadId> = [];
+          for (const threadId of sideChatIds) {
+            if ((yield* findThread(threadId))?.archivedAt === null)
+              unarchivedSideChatIds.push(threadId);
+          }
+          yield* refuseIfChanged(command, [command.threadId, ...unarchivedSideChatIds]);
+        }
         const parentArchivedAt = (yield* findThread(command.threadId))?.archivedAt ?? null;
         yield* dispatchThreadMutation(command, events, effects);
         // Unarchive restores the side chats this parent's archive took, not ones archived before it.

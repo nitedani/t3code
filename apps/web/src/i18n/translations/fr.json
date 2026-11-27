@@ -13043,5 +13043,12 @@
   "95435f0b59cb2193": "Aperçu audio",
   "4a12506938295127": "Saisissez d’abord {field}.",
   "5807c08e225c6b3d": "Télécharger",
-  "0d50b5bfe7151ece": "Impossible de télécharger le fichier"
+  "0d50b5bfe7151ece": "Impossible de télécharger le fichier",
+  "6572f44f2b8f030d": "Fils clos et archivés",
+  "bdb22e8ed3dcdcf1": "Archiver les fils clos",
+  "40eb4974d8282a55": "Archiver un fil clos après ce nombre de jours sans modification. Le désarchiver le fait revenir.",
+  "7a240a7dc1cf6ac3": "Supprimer les fils archivés",
+  "a16843c5733a43bc": "Supprimer un fil après ce nombre de jours dans les archives, y compris ceux que vous avez archivés vous-même. Action irréversible.",
+  "b32e50d8961787d5": "archiver automatiquement fils clos supprimer fils archivés anciens nettoyage rétention jours",
+  "b5a1e4e019c79374": "Mettez à jour les environnements sélectionnés pour nettoyer les fils clos et archivés, ou choisissez une machine qui le prend en charge."
 }

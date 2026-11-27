@@ -57,6 +57,7 @@ import * as WorktreeBranchSync from "./orchestration-v2/WorktreeBranchSync.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import { makeThreadRetention } from "./threadRetention.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as CheckpointCaptureIndex from "./vcs/checkpointCaptureIndex.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -535,6 +536,14 @@ const make = Effect.gen(function* () {
     const snapshot = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
     const projects = yield* projectStore.listShells();
     return { projects, threads: [...snapshot.threads, ...snapshot.archivedThreads] };
+  });
+
+  const readScheduledThreadIds = Effect.fn("StorageCleanup.readScheduledThreadIds")(function* () {
+    const rows = yield* sql<{ threadId: string }>`
+      SELECT thread_id AS "threadId" FROM scheduled_tasks
+      WHERE enabled = 1 AND thread_id IS NOT NULL
+    `.pipe(NodeSqliteClient.readOnly);
+    return new Set(rows.map((row) => row.threadId));
   });
 
   const containsProjectRoot = Effect.fn("StorageCleanup.containsProjectRoot")(function* (
@@ -1216,9 +1225,10 @@ const make = Effect.gen(function* () {
     trigger: StorageCleanupReport["trigger"],
   ) {
     if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled))
-      return { waiting: false, kept: [] };
+      return { waiting: false, kept: [], removedDeletedThreadIds: [] };
     let waiting = false;
     const kept: string[] = [];
+    const removedDeletedThreadIds: string[] = [];
     const roots: Array<string> = [];
     // A git worktree's dev home is seeded from real data, so its threads and any
     // copied settings can point at the developer's real worktrees.
@@ -1256,11 +1266,8 @@ const make = Effect.gen(function* () {
         if (file !== undefined) return `has local files (${file})`;
       }
       // Each run of a scheduled task works on what its earlier runs left in the folder.
-      const scheduled = yield* sql<{ threadId: string }>`
-        SELECT thread_id AS "threadId" FROM scheduled_tasks
-        WHERE enabled = 1 AND thread_id IS NOT NULL
-      `.pipe(NodeSqliteClient.readOnly);
-      if (scheduled.some((task) => threadIds.includes(task.threadId)))
+      const scheduled = yield* readScheduledThreadIds();
+      if (threadIds.some((threadId) => scheduled.has(threadId)))
         return "thread has a scheduled task";
       return null;
     });
@@ -1430,6 +1437,10 @@ const make = Effect.gen(function* () {
       const keep = (reason: string) => {
         if (deleted && settings.worktreeOnDelete) kept.push(worktreePath);
         entries.push({ ...entry, reason: sentence(reason) });
+      };
+      const noteRemoved = (removed: StorageCleanupReportEntry) => {
+        if (deleted) removedDeletedThreadIds.push(thread.id);
+        entries.push(removed);
       };
       // Reasons a provider session stop or finished deletion work can clear.
       const waitForStop = (reason: string) => {
@@ -1642,7 +1653,7 @@ const make = Effect.gen(function* () {
               if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
               if (yield* settingsChangedSinceCheck) return keep("settings changed since check");
               yield* fs.remove(worktreePath, { recursive: true });
-              entries.push({
+              noteRemoved({
                 ...entry,
                 outcome: "removed",
                 reason: sentence(removalReason),
@@ -1695,7 +1706,7 @@ const make = Effect.gen(function* () {
                   ),
               });
               for (const removedPath of result.removed)
-                entries.push({
+                noteRemoved({
                   ...entry,
                   path: removedPath,
                   outcome: "removed",
@@ -1929,7 +1940,7 @@ const make = Effect.gen(function* () {
               execute: git.execute,
               run: (args) => cleanupGit(repository, [...args], "git worktree remove"),
             }).pipe(Effect.tapError(() => noteLeftover(adminDir, entry)));
-            entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
+            noteRemoved({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
             yield* gitManager.invalidateStatus(project.workspaceRoot);
             // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
             yield* Effect.logInfo("storage cleanup removed worktree", { threadId: thread.id });
@@ -1959,7 +1970,7 @@ const make = Effect.gen(function* () {
       scratchRoot,
       trigger,
     );
-    return { waiting, kept };
+    return { waiting, kept, removedDeletedThreadIds };
   });
 
   const cleanFiles = Effect.fn("StorageCleanup.cleanFiles")(function* (
@@ -2000,6 +2011,13 @@ const make = Effect.gen(function* () {
     });
     yield* visit(realRoot);
     return removed;
+  });
+
+  const retention = yield* makeThreadRetention({
+    readThreads: readThreads(),
+    readScheduledThreadIds: readScheduledThreadIds(),
+    threadIdle,
+    failureReason: cleanupFailureReason,
   });
 
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
@@ -2117,12 +2135,19 @@ const make = Effect.gen(function* () {
   // A deletion stays pending until a sweep that started after it finishes.
   let deletedWorktreeWaits = true;
   let keptDeletedWorktrees: ReadonlyArray<string> = [];
+  const inKeptDeletedWorktree = (path: string) => {
+    const cwd = pathKey(path);
+    return keptDeletedWorktrees.some(
+      (worktreePath) => pathKey(worktreePath) === cwd || inside(worktreePath, cwd),
+    );
+  };
   let deletions = 0;
   let sweptDeletions = 0;
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
   ) {
     const deletionsAtStart = deletions;
+    const followsDeletions = deletionsAtStart !== sweptDeletions;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
@@ -2165,13 +2190,28 @@ const make = Effect.gen(function* () {
             files: null,
           });
           yield* Effect.logWarning("worktree cleanup failed", { error });
-          return { waiting: true, kept: [] };
+          return { waiting: true, kept: [], removedDeletedThreadIds: [] };
         }),
       ),
     );
     deletedWorktreeWaits = deletedWorktrees.waiting;
     keptDeletedWorktrees = deletedWorktrees.kept;
     sweptDeletions = deletionsAtStart;
+    // After the worktree rules, which a deletion would otherwise hand a tombstone; its
+    // thread.deleted requests the sweep that cleans up after it.
+    const threadEntries = yield* retention.retire(now);
+    // Until a sweep finds threads of its own, the one after a deletion keeps the last run's
+    // threads, and a later one the last run's rows of deleted threads whose worktree it removed.
+    const lastThreads = (yield* SubscriptionRef.get(reportRef))?.threads ?? [];
+    const removedDeletedThreadIds = new Set<string>(deletedWorktrees.removedDeletedThreadIds);
+    const reportedThreads =
+      trigger !== "automatic" || threadEntries.length > 0
+        ? threadEntries
+        : followsDeletions
+          ? lastThreads
+          : lastThreads.filter(
+              (row) => row.threadId !== null && removedDeletedThreadIds.has(row.threadId),
+            );
     for (const category of [
       {
         kind: "browser-artifacts" as const,
@@ -2242,6 +2282,7 @@ const make = Effect.gen(function* () {
       counts,
       bytesFreed,
       omittedCount: Math.max(0, entries.length - REPORT_ENTRY_LIMIT),
+      threads: reportedThreads,
     };
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;
@@ -2319,18 +2360,15 @@ const make = Effect.gen(function* () {
           (event.payload.status !== "stopped" && event.payload.status !== "error")
         )
           return Effect.void;
-        else if (!deletedWorktreeWaits && deletions === sweptDeletions) {
-          const cwd = pathKey(event.payload.cwd);
-          if (
-            !keptDeletedWorktrees.some(
-              (worktreePath) => pathKey(worktreePath) === cwd || inside(worktreePath, cwd),
-            )
-          )
-            return Effect.void;
-        }
-        if (event.type === "thread.deleted") return requestSweep;
+        else if (
+          !deletedWorktreeWaits &&
+          deletions === sweptDeletions &&
+          !inKeptDeletedWorktree(event.payload.cwd)
+        )
+          return Effect.void;
+        if (event.type !== "provider-session.updated") return requestSweep;
         if (!anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)) return Effect.void;
-        return event.type === "provider-session.updated" && event.payload.status === "error"
+        return event.payload.status === "error"
           ? providerSessions
               .isLive(event.payload.id)
               .pipe(Effect.flatMap((live) => (live ? Effect.void : requestSweep)))

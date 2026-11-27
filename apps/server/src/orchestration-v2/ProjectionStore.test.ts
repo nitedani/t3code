@@ -2860,6 +2860,73 @@ const runlessNativeSubagentNeedsRecovery = Effect.gen(function* () {
   }
 });
 
+const delegatingThreadsWaitOnWorkingTasks = Effect.gen(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = yield* addRolledBackRecoveryCandidate("delegating-owner");
+  const now = yield* DateTime.now;
+  const id = NodeId.make("node:delegating-owner:task");
+  const statuses = [
+    "idle",
+    "pending",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+  ] as const;
+  const task = (
+    status: (typeof statuses)[number],
+    {
+      origin = "app_owned",
+      child = true,
+    }: { origin?: "app_owned" | "provider_native"; child?: boolean } = {},
+  ) =>
+    store.apply({
+      id: EventId.make(`event:delegating-owner:${origin}:${child}:${status}`),
+      type: "subagent.updated",
+      threadId,
+      nodeId: id,
+      driver,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id,
+        threadId,
+        runId: null,
+        parentNodeId: NodeId.make("node:delegating-owner:parent"),
+        origin,
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: child ? ThreadId.make("thread:delegating-owner:child") : null,
+        nativeTaskRef: null,
+        prompt: "Do the work",
+        title: "Delegated task",
+        model: null,
+        status,
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      },
+    });
+  const listed = store
+    .listDelegatingThreadIds()
+    .pipe(Effect.map((threadIds) => threadIds.includes(threadId)));
+  const delegating: Array<string> = [];
+  for (const status of statuses) {
+    yield* task(status);
+    if (yield* listed) delegating.push(status);
+  }
+  assert.deepEqual(delegating, ["pending", "running", "waiting"]);
+  yield* task("running", { child: false });
+  assert.isFalse(yield* listed);
+  yield* task("running", { origin: "provider_native" });
+  assert.isFalse(yield* listed);
+});
+
 const subagentRecordsSelectById = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const threadId = yield* addRolledBackRecoveryCandidate("subagent-records-by-id");
@@ -4050,6 +4117,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
   it.effect(
     "SQL recovery selects unfinished runless native subagents",
     () => runlessNativeSubagentNeedsRecovery,
+  );
+  it.effect(
+    "SQL lists the threads waiting on an app-owned task whose child is at work",
+    () => delegatingThreadsWaitOnWorkingTasks,
   );
   it.effect(
     "snapshot reads report a deleted thread as missing",

@@ -67,6 +67,8 @@ describe("storage cleanup settings", () => {
       worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      settledThreadsAfterDays: null,
+      archivedThreadsAfterDays: null,
     });
   });
 

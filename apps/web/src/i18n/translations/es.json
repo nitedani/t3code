@@ -13038,5 +13038,12 @@
   "95435f0b59cb2193": "Vista previa de audio",
   "4a12506938295127": "Introduce primero {field}.",
   "5807c08e225c6b3d": "Descargar",
-  "0d50b5bfe7151ece": "No se pudo descargar el archivo"
+  "0d50b5bfe7151ece": "No se pudo descargar el archivo",
+  "6572f44f2b8f030d": "Hilos resueltos y archivados",
+  "bdb22e8ed3dcdcf1": "Archivar hilos resueltos",
+  "40eb4974d8282a55": "Archiva un hilo resuelto tras este número de días sin cambios. Desarchivarlo lo recupera.",
+  "7a240a7dc1cf6ac3": "Eliminar hilos archivados",
+  "a16843c5733a43bc": "Elimina un hilo tras este número de días en el archivo, incluidos los que archivaste tú. No se puede deshacer.",
+  "b32e50d8961787d5": "archivar automáticamente hilos resueltos eliminar hilos archivados antiguos limpieza retención días",
+  "b5a1e4e019c79374": "Actualiza los entornos seleccionados para limpiar los hilos resueltos y archivados, o elige una máquina que lo admita."
 }
