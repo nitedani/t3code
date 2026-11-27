@@ -456,14 +456,9 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       const claudeId = ProviderInstanceId.make("claude_2");
       const acpId = ProviderInstanceId.make("kimi_2");
       const { registry } = yield* makeProviderInstanceRegistry({
-        // A blocked instance never starts, so only the ACP driver's metadata is read.
         drivers: [
           ClaudeDriver,
-          {
-            ...ClaudeDriver,
-            driverKind: AcpRegistryDriver.driverKind,
-            metadata: AcpRegistryDriver.metadata,
-          },
+          { ...AcpRegistryDriver, create: () => Effect.die("a blocked instance never starts") },
         ],
         configMap: {
           [claudeId]: { driver: ProviderDriverKind.make("claudeAgent") },
@@ -477,7 +472,7 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       );
       expect(unavailable.get(claudeId)?.displayName).toBe("Claude");
       expect(unavailable.get(claudeId)?.hasCustomDisplayName).toBeUndefined();
-      // A live ACP snapshot names no instance, so the client numbers it from its id ("Kimi 2").
+      expect(unavailable.get(acpId)?.availability).toBe("unavailable");
       expect(unavailable.get(acpId)?.displayName).toBeUndefined();
     }).pipe(Effect.provide(layerTest)),
   );
