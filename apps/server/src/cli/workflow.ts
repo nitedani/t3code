@@ -83,6 +83,7 @@ const startCommand = Command.make("start", {
       }
       yield* withThreadTools(
         flags,
+        { access: "full-access", waits: true },
         Effect.fn("cli.workflow.start")(function* (tools) {
           const started = yield* tools.call(
             "t3_workflow",
@@ -118,6 +119,7 @@ const listCommand = Command.make("list", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.list")(function* (tools) {
         const { runs } = yield* tools.call(
           "t3_workflow",
@@ -149,6 +151,7 @@ const showCommand = Command.make("show", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.show")(function* (tools) {
         yield* printRun(yield* readRun(tools, flags.run), flags.json);
       }),
@@ -199,7 +202,7 @@ const resumeCommand = Command.make("resume", {
 }).pipe(
   Command.withDescription("Run a paused run's failed step again."),
   Command.withHandler((flags) =>
-    withThreadTools(flags, (tools) =>
+    withThreadTools(flags, { access: "full-access", waits: true }, (tools) =>
       steer(tools, "resume", { ...flags, reason: Option.none() }),
     ).pipe(reportThreadErrors),
   ),
@@ -216,7 +219,9 @@ const cancelCommand = Command.make("cancel", {
 }).pipe(
   Command.withDescription("Cancel a run."),
   Command.withHandler((flags) =>
-    withThreadTools(flags, (tools) => steer(tools, "cancel", flags)).pipe(reportThreadErrors),
+    withThreadTools(flags, { access: "full-access", waits: true }, (tools) =>
+      steer(tools, "cancel", flags),
+    ).pipe(reportThreadErrors),
   ),
 );
 
@@ -272,12 +277,15 @@ const signalCommand = Command.make("signal", {
       const threadTitle =
         callingThread === undefined || callingThread === ""
           ? undefined
-          : yield* withThreadTools({ ...flags, json: false }, (tools) =>
-              tools.call(
-                "t3_thread_read",
-                { threadId: callingThread, limit: 1, runLimit: 1 },
-                ThreadTitleResult,
-              ),
+          : yield* withThreadTools(
+              { ...flags, json: false },
+              { access: "full-access", waits: true },
+              (tools) =>
+                tools.call(
+                  "t3_thread_read",
+                  { threadId: callingThread, limit: 1, runLimit: 1 },
+                  ThreadTitleResult,
+                ),
             ).pipe(
               Effect.map(({ thread }) => thread.title.trim()),
               Effect.orElseSucceed(() => undefined),
@@ -285,6 +293,7 @@ const signalCommand = Command.make("signal", {
       yield* withThreadTools(
         // Named on the answer to a question it sends.
         { ...flags, json: false, clientLabel: threadTitle || "t3 workflow signal" },
+        { access: "full-access", waits: true },
         Effect.fn("cli.workflow.signal")(function* (tools) {
           const { delivery } = yield* tools.call(
             "t3_workflow",
@@ -324,6 +333,7 @@ const withdrawCommand = Command.make("withdraw", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.withdraw")(function* (tools) {
         const { withdrawal, ...result } = yield* tools.call(
           "t3_workflow",
@@ -359,6 +369,7 @@ const questionsCommand = Command.make("questions", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.questions")(function* (tools) {
         const { questions } = yield* tools.call(
           "t3_workflow",
@@ -387,6 +398,7 @@ const hooksCommand = Command.make("hooks", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.hooks")(function* (tools) {
         const { hooks } = yield* tools.call("t3_workflow", { action: "hooks" }, HooksResult);
         if (flags.json) return yield* printJson(hooks);
@@ -415,6 +427,7 @@ const storeListCommand = Command.make("list", {
   Command.withHandler((flags) =>
     withThreadTools(
       flags,
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.store.list")(function* (tools) {
         const { entries } = yield* tools.call(
           "t3_workflow",
@@ -442,6 +455,7 @@ const storeSetCommand = Command.make("set", {
       const value = yield* jsonArgument(flags.value, "The value");
       yield* withThreadTools(
         { ...flags, json: false },
+        { access: "full-access", waits: true },
         Effect.fn("cli.workflow.store.set")(function* (tools) {
           yield* tools.call(
             "t3_workflow",
@@ -463,6 +477,7 @@ const storeDeleteCommand = Command.make("delete", {
   Command.withHandler((flags) =>
     withThreadTools(
       { ...flags, json: false },
+      { access: "full-access", waits: true },
       Effect.fn("cli.workflow.store.delete")(function* (tools) {
         yield* tools.call("t3_workflow", { action: "store_delete", key: flags.key }, StoreResult);
         yield* Console.log(`Deleted ${flags.key}.`);

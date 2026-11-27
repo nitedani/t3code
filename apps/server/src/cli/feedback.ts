@@ -139,6 +139,7 @@ export const feedbackCommand = Command.make("feedback", {
   Command.withHandler(({ baseDir, kind, subject, expected, actual, workaround }) =>
     withThreadTools(
       { baseDir, json: true, clientLabel: FEEDBACK_CLI_CLIENT_LABEL },
+      { access: "full-access", waits: true },
       Effect.fn("cli.feedback.submit")(function* (tools) {
         const report = yield* tools.call(
           "t3_feedback",
