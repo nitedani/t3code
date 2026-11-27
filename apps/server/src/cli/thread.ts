@@ -1,4 +1,5 @@
 import {
+  type AuthMcpClientAccess,
   NonNegativeInt,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
@@ -17,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -55,6 +57,7 @@ const TERMINAL_RUN_STATUSES = new Set<OrchestratorMcpThreadRun["status"]>([
 const READ_PAGE_LIMIT = 100;
 const READ_ITEM_MAX_CHARS = 20_000;
 const TITLE_MAX_CHARS = 80;
+const CLI_SESSION_TTL = Duration.minutes(10);
 
 export class ThreadServerNotRunningError extends Schema.TaggedError<ThreadServerNotRunningError>()(
   "ThreadServerNotRunningError",
@@ -250,11 +253,25 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
  * Signs in as a short-lived MCP client of the running server, the same way an
  * outside agent does, and revokes that session when the command ends.
  */
-export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
+export const withThreadTools = <A, E, R>(
   flags: {
     readonly baseDir: Option.Option<string>;
     readonly json: boolean;
     readonly clientLabel?: string;
+  },
+  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+) => withThreadToolsAs(flags, { access: "full-access", waits: true }, run);
+
+const withThreadToolsAs = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly json: boolean;
+    readonly clientLabel?: string;
+  },
+  sessionOptions: {
+    readonly access: AuthMcpClientAccess;
+    /** A `--wait` has no upper bound, so it keeps the default MCP session lifetime. */
+    readonly waits: boolean;
   },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
 ) {
@@ -273,9 +290,11 @@ export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function*
         label: flags.clientLabel ?? "t3 thread cli",
         // The CLI runs as the machine's owner. New threads still start at
         // the project's default mode, never at this ceiling by default.
-        access: "full-access",
+        access: sessionOptions.access,
         peerLink: false,
         client: { deviceType: "bot" },
+        // Release does not run when the CLI is killed; expiry bounds what it leaves behind.
+        ...(sessionOptions.waits ? {} : { ttl: CLI_SESSION_TTL }),
       }),
       (session) =>
         environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
@@ -892,8 +911,9 @@ const threadListCommand = Command.make("list", {
 }).pipe(
   Command.withDescription("List a project's threads, newest first."),
   Command.withHandler((flags) =>
-    withThreadTools(
+    withThreadToolsAs(
       flags,
+      { access: "read-only", waits: false },
       Effect.fn("cli.thread.list")(function* (tools) {
         const project = yield* resolveProject(tools, flags.project);
         const threads: Array<OrchestratorMcpThreadListItem> = [];
@@ -974,8 +994,9 @@ const threadStartCommand = Command.make("start", {
       const title = yield* decodeTitle(
         Option.getOrElse(flags.title, () => titleFromMessage(message)),
       ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
-      yield* withThreadTools(
+      yield* withThreadToolsAs(
         flags,
+        { access: "full-access", waits: flags.wait },
         Effect.fn("cli.thread.start")(function* (tools) {
           const project = yield* resolveProject(tools, flags.project);
           const launched = yield* tools.call(
@@ -1023,8 +1044,9 @@ const threadSendCommand = Command.make("send", {
       const threadId = yield* decodeThreadId(flags.thread);
       const message = yield* readMessageArgument(flags.message);
       const output = yield* readOutputSchema(flags.outputSchema);
-      yield* withThreadTools(
+      yield* withThreadToolsAs(
         flags,
+        { access: "full-access", waits: flags.wait },
         Effect.fn("cli.thread.send")(function* (tools) {
           // Work already running when this is sent is not this message's to wait for.
           const followWakes = flags.wait ? yield* threadIsIdle(tools, threadId) : false;
@@ -1064,8 +1086,9 @@ const threadShowCommand = Command.make("show", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const threadId = yield* decodeThreadId(flags.thread);
-      yield* withThreadTools(
+      yield* withThreadToolsAs(
         flags,
+        { access: "read-only", waits: false },
         Effect.fn("cli.thread.show")(function* (tools) {
           const { thread, messages: latest } = yield* readLatestMessages(
             tools,
