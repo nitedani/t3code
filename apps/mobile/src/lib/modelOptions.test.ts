@@ -313,6 +313,80 @@ describe("mobile model options", () => {
     ).toBe(false);
   });
 
+  it("labels catalog groups, filters and saved fallbacks with the account's own name", () => {
+    const config = {
+      providers: ["claudeAgent", "claude_2"].map((instanceId) => ({
+        instanceId,
+        driver: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [{ slug: "test", name: "Test", capabilities: null }],
+      })),
+    } as unknown as ServerConfig;
+    const selection = { instanceId: ProviderInstanceId.make("claude_2"), model: "saved" };
+    const options = buildModelOptions(config, selection, undefined, null);
+    expect(options.map((option) => option.providerLabel)).toEqual([
+      "Claude",
+      "Claude 2",
+      "Claude 2",
+    ]);
+    expect(groupByProvider(options).map((group) => group.providerLabel)).toEqual([
+      "Claude",
+      "Claude 2",
+    ]);
+
+    const named = {
+      providers: config.providers.map((provider) =>
+        provider.instanceId === "claude_2" ? { ...provider, hasCustomDisplayName: true } : provider,
+      ),
+    } as unknown as ServerConfig;
+    const namedOptions = buildModelOptions(named, selection, undefined, null);
+    expect(namedOptions.map((option) => option.providerLabel)).toEqual([
+      "Claude",
+      "Claude",
+      "Claude",
+    ]);
+    expect(groupByProvider(namedOptions).map((group) => group.providerKey)).toEqual([
+      "claudeAgent",
+      "claude_2",
+    ]);
+  });
+
+  it("takes an account's name and whether it was set from the same source", () => {
+    const provider = {
+      instanceId: "claude_2",
+      driver: "claudeAgent",
+      displayName: "Claude",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [{ slug: "test", name: "Test", capabilities: null }],
+    };
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: { claude_2: { driver: "claudeAgent", displayName: "Work" } },
+    };
+    const renamedBeforeSnapshot = { providers: [provider], settings } as unknown as ServerConfig;
+    expect(
+      buildModelOptions(renamedBeforeSnapshot, null, undefined, null)[0]?.providerBadge
+        ?.displayName,
+    ).toBe("Claude 2");
+    const namedInSettingsOnly = {
+      providers: [],
+      settings: {
+        ...settings,
+        providerInstances: { claude_2: { driver: "claudeAgent", displayName: "Claude" } },
+      },
+    } as unknown as ServerConfig;
+    const selection = { instanceId: ProviderInstanceId.make("claude_2"), model: "saved" };
+    expect(
+      buildModelOptions(namedInSettingsOnly, selection, undefined, null)[0]?.providerBadge
+        ?.displayName,
+    ).toBe("Claude");
+  });
+
   it("only badges ACP accounts that share the same agent", () => {
     const config = {
       settings: {
@@ -564,6 +638,17 @@ describe("mobile model options", () => {
       expect(isModelSelectionUnavailable(null, selection, null)).toBe(false);
       expect(buildModelOptions(null, selection, undefined, null)[0]?.selection).toBe(selection);
       expect(buildModelOptions(null, selection, undefined, null)[0]?.isUnavailable).not.toBe(true);
+      expect(buildModelOptions(null, selection, undefined, null)[0]?.providerLabel).toBe(
+        selection.instanceId,
+      );
+      for (const [instanceId, label] of [
+        ["codex", "Codex"],
+        ["claudeAgent", "Claude"],
+        ["pi", "Pi"],
+      ] as const) {
+        const saved = { instanceId: ProviderInstanceId.make(instanceId), model: "saved" };
+        expect(buildModelOptions(null, saved, undefined, null)[0]?.providerLabel).toBe(label);
+      }
       expect(isModelSelectionUnavailable(unknownConfig, selection, null)).toBe(false);
       expect(resolveSelectableModelSelection(unknownConfig, selection, null)).toBeNull();
     });

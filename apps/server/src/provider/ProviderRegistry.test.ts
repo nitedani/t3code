@@ -2929,6 +2929,7 @@ it.layer(
         const driver = ProviderDriverKind.make("antigravity");
         const instanceId = ProviderInstanceId.make("account-a");
         let displayName = "Account A";
+        let hasCustomDisplayName: true | undefined = true;
         const instance: ProviderInstance = {
           instanceId,
           driverKind: driver,
@@ -2949,6 +2950,7 @@ it.layer(
               instanceId,
               driver,
               displayName,
+              ...(hasCustomDisplayName ? { hasCustomDisplayName } : {}),
               status: "ready" as const,
               enabled: true,
               installed: true,
@@ -2988,14 +2990,26 @@ it.layer(
           ),
         ).pipe(Scope.provide(scope));
         const registry = yield* ProviderRegistry.ProviderRegistry.pipe(Effect.provide(services));
-        const relabelled = yield* registry.streamChanges.pipe(
-          Stream.filter((providers) => providers[0]?.displayName === "Account B"),
-          Stream.runHead,
-          Effect.forkChild({ startImmediately: true }),
-        );
-        displayName = "Account B";
-        yield* PubSub.publish(changes, undefined);
-        assert.isTrue(Option.isSome(yield* Fiber.join(relabelled)));
+        const relabel = (name: string, custom: true | undefined) =>
+          Effect.gen(function* () {
+            const relabelled = yield* registry.streamChanges.pipe(
+              Stream.filter(
+                (providers) =>
+                  providers[0]?.displayName === name &&
+                  providers[0]?.hasCustomDisplayName === custom,
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
+            );
+            displayName = name;
+            hasCustomDisplayName = custom;
+            yield* PubSub.publish(changes, undefined);
+            assert.isTrue(Option.isSome(yield* Fiber.join(relabelled)));
+          });
+        yield* relabel("Account B", true);
+        yield* relabel("Antigravity", undefined);
+        yield* relabel("Antigravity", true);
+        yield* relabel("Antigravity", undefined);
       }),
     );
 

@@ -23,6 +23,7 @@ import {
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import { OpenCodeSettings } from "@t3tools/provider-opencode/settings";
 import { PiDriver } from "@t3tools/provider-pi/server";
+import { AcpRegistryDriver } from "@t3tools/provider-acp-registry/server";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as DateTime from "effect/DateTime";
@@ -397,13 +398,14 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       });
       const initial = yield* registry.getInstance(instanceId);
       const before = yield* initial!.snapshot.getSnapshot;
-      expect(before.displayName).toBe("My Pi account");
+      expect(before).toMatchObject({ displayName: "My Pi account", hasCustomDisplayName: true });
 
       yield* mutator.reconcile({ [instanceId]: entry });
 
       const updated = yield* registry.getInstance(instanceId);
       const after = yield* updated!.snapshot.getSnapshot;
       expect(after.displayName).toBe("Pi");
+      expect(after.hasCustomDisplayName).toBeUndefined();
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -446,6 +448,32 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       expect(unavailable?.instanceId).toBe(instanceId);
       expect(unavailable?.availability).toBe("unavailable");
       expect(unavailable?.unavailableReason).toBe(reason);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("labels an unnamed unavailable instance with its driver's label, as a live one", () =>
+    Effect.gen(function* () {
+      const claudeId = ProviderInstanceId.make("claude_2");
+      const acpId = ProviderInstanceId.make("kimi_2");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [
+          ClaudeDriver,
+          { ...AcpRegistryDriver, create: () => Effect.die("a blocked instance never starts") },
+        ],
+        configMap: {
+          [claudeId]: { driver: ProviderDriverKind.make("claudeAgent") },
+          [acpId]: { driver: ProviderDriverKind.make("acpRegistry") },
+        },
+        blockedReason: () => "Blocked by policy.",
+      });
+
+      const unavailable = new Map(
+        (yield* registry.listUnavailable).map((snapshot) => [snapshot.instanceId, snapshot]),
+      );
+      expect(unavailable.get(claudeId)?.displayName).toBe("Claude");
+      expect(unavailable.get(claudeId)?.hasCustomDisplayName).toBeUndefined();
+      expect(unavailable.get(acpId)?.availability).toBe("unavailable");
+      expect(unavailable.get(acpId)?.displayName).toBeUndefined();
     }).pipe(Effect.provide(layerTest)),
   );
 

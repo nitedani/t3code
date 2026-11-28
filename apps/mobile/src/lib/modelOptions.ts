@@ -10,6 +10,7 @@ import type {
   ModelCapabilities,
   ModelSelection,
   ProjectId,
+  ProviderDriverKind,
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
@@ -358,20 +359,24 @@ export function buildModelOptions(
     enabled: provider.enabled,
     acpRegistryAgentId: registryAgentId(provider.instanceId),
   }));
-  const providerBadgeFor = (instanceId: ModelSelection["instanceId"]) => {
+  const providerBadgeFor = (
+    instanceId: ModelSelection["instanceId"],
+    driver: ProviderDriverKind,
+  ) => {
     const snapshot = config?.providers.find((provider) => provider.instanceId === instanceId);
     const instance = config?.settings?.providerInstances[instanceId];
-    const driver = snapshot?.driver ?? instance?.driver;
-    if (!driver) return undefined;
     const accentColor = normalizeProviderAccentColor(
       snapshot?.accentColor ?? instance?.accentColor,
     );
+    const name =
+      snapshot?.displayName !== undefined
+        ? { displayName: snapshot.displayName, hasCustomDisplayName: snapshot.hasCustomDisplayName }
+        : {
+            displayName: instance?.displayName,
+            hasCustomDisplayName: instance?.displayName !== undefined,
+          };
     return {
-      displayName: resolveProviderInstanceDisplayName({
-        instanceId,
-        driver,
-        displayName: snapshot?.displayName ?? instance?.displayName,
-      }),
+      displayName: resolveProviderInstanceDisplayName({ instanceId, driver, ...name }),
       ...(accentColor ? { accentColor } : {}),
       showBadge: shouldShowInstanceBadge(
         {
@@ -397,8 +402,7 @@ export function buildModelOptions(
       continue;
     }
 
-    const providerLabel = providerDisplayLabel(provider);
-    const providerBadge = providerBadgeFor(provider.instanceId);
+    const providerBadge = providerBadgeFor(provider.instanceId, provider.driver);
     const updateRequired = provider.updateRequiredModels?.length
       ? {
           driver: provider.driver,
@@ -423,7 +427,7 @@ export function buildModelOptions(
         ...(shortName ? { shortName } : {}),
         subtitle: model.subProvider ?? "",
         providerKey: provider.instanceId,
-        providerLabel,
+        providerLabel: providerBadge.displayName,
         providerDriver: provider.driver,
         providerBadge,
         ...(provider.supportedRuntimeModes === undefined
@@ -477,13 +481,11 @@ export function buildModelOptions(
       const model = provider?.models.find(
         (candidate) => candidate.slug === fallbackModelSelection.model,
       );
-      const providerDriver =
-        provider?.driver ?? instanceConfig?.driver ?? fallbackModelSelection.instanceId;
-      const providerLabel = providerDisplayLabel({
-        driver: providerDriver,
-        displayName: provider?.displayName ?? instanceConfig?.displayName,
-        instanceId: fallbackModelSelection.instanceId,
-      });
+      const knownDriver = provider?.driver ?? instanceConfig?.driver;
+      const providerBadge = knownDriver
+        ? providerBadgeFor(fallbackModelSelection.instanceId, knownDriver)
+        : undefined;
+      const providerDriver = knownDriver ?? fallbackModelSelection.instanceId;
       const shortName = model
         ? resolveModelShortName(model, isProviderDriverKind(providerDriver) ? providerDriver : null)
         : undefined;
@@ -493,9 +495,14 @@ export function buildModelOptions(
         ...(shortName ? { shortName } : {}),
         subtitle: model?.subProvider ?? "",
         providerKey: fallbackModelSelection.instanceId,
-        providerLabel,
+        providerLabel:
+          providerBadge?.displayName ??
+          providerDisplayLabel({
+            driver: fallbackModelSelection.instanceId,
+            instanceId: fallbackModelSelection.instanceId,
+          }),
         providerDriver,
-        providerBadge: providerBadgeFor(fallbackModelSelection.instanceId),
+        providerBadge,
         isDefault: false,
         isLegacy: model?.isLegacy === true,
         ...(isModelSelectionUnavailable(config, fallbackModelSelection, projectId) ||

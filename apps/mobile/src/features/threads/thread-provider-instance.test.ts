@@ -23,6 +23,7 @@ function makeConfig(
     readonly instanceId: string;
     readonly driver: string;
     readonly displayName?: string;
+    readonly hasCustomDisplayName?: boolean;
     readonly accentColor?: string;
   }>,
 ): ServerConfig {
@@ -165,6 +166,27 @@ describe("createThreadRowProviderInstanceResolver", () => {
       );
       expect(restored(personal)?.showBadge).toBe(true);
       expect(restored(work)?.showBadge).toBe(true);
+
+      const workNamed = (hasCustomDisplayName: boolean) =>
+        makeConfig([
+          { instanceId: "codex", driver: "codex" },
+          {
+            instanceId: "codex_work",
+            driver: "codex",
+            displayName: "Codex",
+            ...(hasCustomDisplayName ? { hasCustomDisplayName } : {}),
+          },
+        ]);
+      const workLabelAfter = (next: ServerConfig) => {
+        registry.set(configs, new Map([[environmentId, next]]));
+        return createThreadRowProviderInstanceResolver(
+          registry.get(environments).providersByEnvironmentId,
+        )(work)?.displayName;
+      };
+      expect(workLabelAfter(workNamed(false))).toBe("Codex Work");
+      expect(workLabelAfter(workNamed(true))).toBe("Codex");
+      expect(workLabelAfter(workNamed(false))).toBe("Codex Work");
+      expect(workLabelAfter(config)).toBe("Codex Work");
     } finally {
       registry.dispose();
     }
